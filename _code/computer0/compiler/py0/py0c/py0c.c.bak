@@ -1,0 +1,2006 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#define MAX_TOKEN_LEN 1024
+#define MAX_PARAMS 64
+#define MAX_STACK 128
+
+typedef enum {
+    TOKEN_EOF, TOKEN_NEWLINE, TOKEN_INDENT, TOKEN_DEDENT,
+    TOKEN_NAME, TOKEN_NUM, TOKEN_STRING,
+    TOKEN_TRUE, TOKEN_FALSE, TOKEN_NONE, TOKEN_ELLIPSIS,
+    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_DOUBLESLASH,
+    TOKEN_PERCENT, TOKEN_AT, TOKEN_AMPERSAND, TOKEN_PIPE, TOKEN_CARET,
+    TOKEN_LSHIFT, TOKEN_RSHIFT, TOKEN_DOUBLE_STAR,
+    TOKEN_EQ, TOKEN_DOUBLE_EQ, TOKEN_NE, TOKEN_LE, TOKEN_GE,
+    TOKEN_LT, TOKEN_GT, TOKEN_COLON, TOKEN_SEMICOLON, TOKEN_COMMA,
+    TOKEN_DOT, TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACKET, TOKEN_RBRACKET,
+    TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_ARROW, TOKEN_COLON_EQ,
+    TOKEN_PLUS_EQ, TOKEN_MINUS_EQ, TOKEN_STAR_EQ, TOKEN_SLASH_EQ,
+    TOKEN_DOUBLESLASH_EQ, TOKEN_PERCENT_EQ, TOKEN_AT_EQ,
+    TOKEN_AMPERSAND_EQ, TOKEN_PIPE_EQ, TOKEN_CARET_EQ,
+    TOKEN_LSHIFT_EQ, TOKEN_RSHIFT_EQ, TOKEN_DOUBLE_STAR_EQ,
+    TOKEN_QUESTION, TOKEN_BAR, TOKEN_KEYWORD,
+    TOKEN_INDENT_LEVEL, TOKEN_DEDENT_MARKER
+} TokenType;
+
+char token[MAX_TOKEN_LEN];
+TokenType token_type;
+FILE *in_fp, *out_fp;
+int t_idx = 0;
+int l_idx = 0;
+int line_num = 0;
+
+int indent_stack[MAX_STACK];
+int indent_sp = 0;
+
+int in_function = 0;
+char func_params[MAX_PARAMS][MAX_TOKEN_LEN];
+int param_count = 0;
+char func_local_vars[MAX_PARAMS][MAX_TOKEN_LEN];
+int local_var_count = 0;
+
+int in_async = 0;
+int in_class = 0;
+
+int loop_depth = 0;
+int* loop_end_labels = NULL;
+int loop_end_sp = 0;
+
+const char* keywords[] = {
+    "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from",
+    "global", "if", "import", "in", "is", "lambda", "nonlocal", "not",
+    "or", "pass", "raise", "return", "try", "while", "with", "yield", NULL
+};
+
+int is_keyword(const char* s) {
+    for (int i = 0; keywords[i]; i++)
+        if (strcmp(s, keywords[i]) == 0) return 1;
+    return 0;
+}
+
+int peek_char() {
+    int c = fgetc(in_fp);
+    ungetc(c, in_fp);
+    return c;
+}
+
+int next_char() {
+    return fgetc(in_fp);
+}
+
+void next_token();
+
+void get_t(char* buf, size_t size) { snprintf(buf, size, "t%d", t_idx++); }
+void get_l(char* buf, size_t size) { snprintf(buf, size, "L_%d", l_idx++); }
+
+void emit(const char* op, const char* a, const char* b, const char* r) {
+    fprintf(out_fp, "%-15s %-10s %-4s %s\n", op, a, b, r);
+}
+
+int accept(const char* s) {
+    if (strcmp(token, s) == 0) { next_token(); return 1; }
+    return 0;
+}
+
+void expect(const char* s) {
+    if (strcmp(token, s) != 0) {
+        fprintf(stderr, "Syntax error: expected '%s', got '%s' at line %d\n", s, token, line_num);
+        exit(1);
+    }
+    next_token();
+}
+
+void skip_comment() {
+    int c;
+    while ((c = fgetc(in_fp)) != EOF && c != '\n') {}
+    if (c == '\n') ungetc(c, in_fp);
+}
+
+void next_token() {
+    int c = fgetc(in_fp);
+    
+    while (c != EOF && (c == ' ' || c == '\t')) c = fgetc(in_fp);
+    
+    if (c == EOF) {
+        strcpy(token, "EOF");
+        token_type = TOKEN_EOF;
+        if (indent_sp > 0) {
+            indent_stack[indent_sp--] = 0;
+            token_type = TOKEN_DEDENT;
+        }
+        return;
+    }
+    
+    if (c == '\n') {
+        line_num++;
+        c = fgetc(in_fp);
+        
+        if (c == '#') {
+            ungetc(c, in_fp);
+            skip_comment();
+            ungetc('\n', in_fp);
+            next_token();
+            return;
+        }
+        if (c == EOF) {
+            strcpy(token, "EOF");
+            token_type = TOKEN_EOF;
+            return;
+        }
+        if (c == '\n') {
+            ungetc(c, in_fp);
+            next_token();
+            return;
+        }
+        
+        int indent = 0;
+        while (c == ' ' || c == '\t') {
+            indent++;
+            c = fgetc(in_fp);
+        }
+        
+        if (c == '#') {
+            ungetc(c, in_fp);
+            skip_comment();
+            ungetc('\n', in_fp);
+            next_token();
+            return;
+        }
+        if (c == EOF) {
+            strcpy(token, "EOF");
+            token_type = TOKEN_EOF;
+            return;
+        }
+        if (c == '\n') {
+            ungetc(c, in_fp);
+            next_token();
+            return;
+        }
+        
+        ungetc(c, in_fp);
+        
+        if (indent > indent_stack[indent_sp]) {
+            indent_stack[++indent_sp] = indent;
+            strcpy(token, "INDENT");
+            token_type = TOKEN_INDENT;
+        } else if (indent < indent_stack[indent_sp]) {
+            while (indent_sp > 0 && indent < indent_stack[indent_sp]) {
+                indent_sp--;
+            }
+            strcpy(token, "DEDENT");
+            token_type = TOKEN_DEDENT;
+        } else {
+            next_token();
+        }
+        return;
+    }
+    
+    if (c == '#') {
+        skip_comment();
+        next_token();
+        return;
+    }
+    
+    if (isdigit(c) || (c == '.' && isdigit(peek_char()))) {
+        int i = 0;
+        int has_hex = 0, has_oct = 0, has_bin = 0;
+        int has_imag = 0;
+        
+        if (c == '0' && (peek_char() == 'x' || peek_char() == 'X' || 
+                         peek_char() == 'o' || peek_char() == 'O' ||
+                         peek_char() == 'b' || peek_char() == 'B')) {
+            token[i++] = c;
+            c = fgetc(in_fp);
+            token[i++] = c;
+            if (c == 'x' || c == 'X') has_hex = 1;
+            else if (c == 'o' || c == 'O') has_oct = 1;
+            else if (c == 'b' || c == 'B') has_bin = 1;
+            
+            while (isalnum(c = fgetc(in_fp)) || c == '_') {
+                token[i++] = c;
+            }
+            ungetc(c, in_fp);
+        } else {
+            while (isdigit(c) || c == '.' || c == 'e' || c == 'E' || 
+                   c == '_' || c == 'j' || c == 'J' ||
+                   (has_hex && isxdigit(c)) ||
+                   (has_oct && c >= '0' && c <= '7') ||
+                   (has_bin && (c == '0' || c == '1'))) {
+                if (c == 'j' || c == 'J') has_imag = 1;
+                token[i++] = c;
+                c = fgetc(in_fp);
+            }
+            ungetc(c, in_fp);
+        }
+        token[i] = '\0';
+        token_type = TOKEN_NUM;
+        return;
+    }
+    
+    if (c == '"' || c == '\'') {
+        int quote_char = c;
+        int is_triple = 0;
+        int i = 0;
+        
+        c = fgetc(in_fp);
+        if (c == quote_char) {
+            c = fgetc(in_fp);
+            if (c == quote_char) {
+                is_triple = 1;
+            } else {
+                token[i++] = quote_char; token[i++] = quote_char;
+                ungetc(c, in_fp);
+                token[i] = '\0';
+                token_type = TOKEN_STRING;
+                return;
+            }
+        } else {
+            token[i++] = quote_char;
+        }
+        
+        if (is_triple) {
+            while ((c = fgetc(in_fp)) != EOF) {
+                if (c == '\\') {
+                    token[i++] = c;
+                    token[i++] = fgetc(in_fp);
+                } else if (c == quote_char) {
+                    int c2 = fgetc(in_fp);
+                    int c3 = fgetc(in_fp);
+                    if (c2 == quote_char && c3 == quote_char) {
+                        token[i++] = quote_char; token[i++] = quote_char; token[i++] = quote_char;
+                        break;
+                    }
+                    token[i++] = c; token[i++] = c2; token[i++] = c3;
+                } else {
+                    token[i++] = c;
+                }
+            }
+        } else {
+            while ((c = fgetc(in_fp)) != quote_char && c != EOF && c != '\n') {
+                if (c == '\\') {
+                    token[i++] = c;
+                    token[i++] = fgetc(in_fp);
+                } else {
+                    token[i++] = c;
+                }
+            }
+            if (c == quote_char) token[i++] = quote_char;
+        }
+        token[i] = '\0';
+        token_type = TOKEN_STRING;
+        return;
+    }
+    
+    if (isalpha(c) || c == '_') {
+        int i = 0;
+        while (isalnum(c) || c == '_') {
+            token[i++] = c;
+            c = fgetc(in_fp);
+        }
+        ungetc(c, in_fp);
+        token[i] = '\0';
+        
+        if (is_keyword(token)) {
+            token_type = TOKEN_KEYWORD;
+        } else if (strcmp(token, "True") == 0) {
+            token_type = TOKEN_TRUE;
+        } else if (strcmp(token, "False") == 0) {
+            token_type = TOKEN_FALSE;
+        } else if (strcmp(token, "None") == 0) {
+            token_type = TOKEN_NONE;
+        } else {
+            token_type = TOKEN_NAME;
+        }
+        return;
+    }
+    
+    switch (c) {
+        case '+':
+            if (peek_char() == '=') { next_char(); strcpy(token, "+="); token_type = TOKEN_PLUS_EQ; }
+            else { strcpy(token, "+"); token_type = TOKEN_PLUS; }
+            break;
+        case '-':
+            if (peek_char() == '=') { next_char(); strcpy(token, "-="); token_type = TOKEN_MINUS_EQ; }
+            else if (peek_char() == '>') { next_char(); strcpy(token, "->"); token_type = TOKEN_ARROW; }
+            else { strcpy(token, "-"); token_type = TOKEN_MINUS; }
+            break;
+        case '*':
+            if (peek_char() == '*') {
+                next_char();
+                if (peek_char() == '=') { next_char(); strcpy(token, "**="); token_type = TOKEN_DOUBLE_STAR_EQ; }
+                else { strcpy(token, "**"); token_type = TOKEN_DOUBLE_STAR; }
+            } else if (peek_char() == '=') { next_char(); strcpy(token, "*="); token_type = TOKEN_STAR_EQ; }
+            else { strcpy(token, "*"); token_type = TOKEN_STAR; }
+            break;
+        case '/':
+            if (peek_char() == '/') {
+                next_char();
+                if (peek_char() == '=') { next_char(); strcpy(token, "//="); token_type = TOKEN_DOUBLESLASH_EQ; }
+                else { strcpy(token, "//"); token_type = TOKEN_DOUBLESLASH; }
+            } else if (peek_char() == '=') { next_char(); strcpy(token, "/="); token_type = TOKEN_SLASH_EQ; }
+            else { strcpy(token, "/"); token_type = TOKEN_SLASH; }
+            break;
+        case '%':
+            if (peek_char() == '=') { next_char(); strcpy(token, "%="); token_type = TOKEN_PERCENT_EQ; }
+            else { strcpy(token, "%"); token_type = TOKEN_PERCENT; }
+            break;
+        case '@':
+            if (peek_char() == '=') { next_char(); strcpy(token, "@="); token_type = TOKEN_AT_EQ; }
+            else { strcpy(token, "@"); token_type = TOKEN_AT; }
+            break;
+        case '&':
+            if (peek_char() == '=') { next_char(); strcpy(token, "&="); token_type = TOKEN_AMPERSAND_EQ; }
+            else { strcpy(token, "&"); token_type = TOKEN_AMPERSAND; }
+            break;
+        case '|':
+            if (peek_char() == '=') { next_char(); strcpy(token, "|="); token_type = TOKEN_PIPE_EQ; }
+            else { strcpy(token, "|"); token_type = TOKEN_PIPE; }
+            break;
+        case '^':
+            if (peek_char() == '=') { next_char(); strcpy(token, "^="); token_type = TOKEN_CARET_EQ; }
+            else { strcpy(token, "^"); token_type = TOKEN_CARET; }
+            break;
+        case '<':
+            if (peek_char() == '<') {
+                next_char();
+                if (peek_char() == '=') { next_char(); strcpy(token, "<<="); token_type = TOKEN_LSHIFT_EQ; }
+                else { strcpy(token, "<<"); token_type = TOKEN_LSHIFT; }
+            } else if (peek_char() == '=') { next_char(); strcpy(token, "<="); token_type = TOKEN_LE; }
+            else { strcpy(token, "<"); token_type = TOKEN_LT; }
+            break;
+        case '>':
+            if (peek_char() == '>') {
+                next_char();
+                if (peek_char() == '=') { next_char(); strcpy(token, ">>="); token_type = TOKEN_RSHIFT_EQ; }
+                else { strcpy(token, ">>"); token_type = TOKEN_RSHIFT; }
+            } else if (peek_char() == '=') { next_char(); strcpy(token, ">="); token_type = TOKEN_GE; }
+            else { strcpy(token, ">"); token_type = TOKEN_GT; }
+            break;
+        case '=':
+            if (peek_char() == '=') { next_char(); strcpy(token, "=="); token_type = TOKEN_DOUBLE_EQ; }
+            else { strcpy(token, "="); token_type = TOKEN_EQ; }
+            break;
+        case '!':
+            if (peek_char() == '=') { next_char(); strcpy(token, "!="); token_type = TOKEN_NE; }
+            else { strcpy(token, "!"); token_type = TOKEN_QUESTION; }
+            break;
+        case ':':
+            if (peek_char() == '=') { next_char(); strcpy(token, ":="); token_type = TOKEN_COLON_EQ; }
+            else { strcpy(token, ":"); token_type = TOKEN_COLON; }
+            break;
+        case '.':
+            if (peek_char() == '.' && fgetc(in_fp) == '.') {
+                strcpy(token, "..."); token_type = TOKEN_ELLIPSIS;
+            } else {
+                ungetc(c, in_fp);
+                strcpy(token, "."); token_type = TOKEN_DOT;
+            }
+            break;
+        case '(': strcpy(token, "("); token_type = TOKEN_LPAREN; break;
+        case ')': strcpy(token, ")"); token_type = TOKEN_RPAREN; break;
+        case '[': strcpy(token, "["); token_type = TOKEN_LBRACKET; break;
+        case ']': strcpy(token, "]"); token_type = TOKEN_RBRACKET; break;
+        case '{': strcpy(token, "{"); token_type = TOKEN_LBRACE; break;
+        case '}': strcpy(token, "}"); token_type = TOKEN_RBRACE; break;
+        case ',': strcpy(token, ","); token_type = TOKEN_COMMA; break;
+        case ';': strcpy(token, ";"); token_type = TOKEN_SEMICOLON; break;
+        case '~': strcpy(token, "~"); token_type = TOKEN_CARET; break;
+        default: token[0] = c; token[1] = '\0'; token_type = TOKEN_KEYWORD; break;
+    }
+}
+
+int accept_token_type(TokenType t) {
+    if (token_type == t) { next_token(); return 1; }
+    return 0;
+}
+
+int peek_token_is(const char* s) {
+    return strcmp(token, s) == 0;
+}
+
+int is_simple_target() {
+    return token_type == TOKEN_NAME;
+}
+
+void parse_expression(char *res_t);
+void parse_or(char *res_t);
+void parse_and(char *res_t);
+void parse_not(char *res_t);
+void parse_compare(char *res_t);
+void parse_bitor(char *res_t);
+void parse_bitxor(char *res_t);
+void parse_bitand(char *res_t);
+void parse_shift(char *res_t);
+void parse_add(char *res_t);
+void parse_mul(char *res_t);
+void parse_unary(char *res_t);
+void parse_power(char *res_t);
+void parse_await(char *res_t);
+void parse_primary(char *res_t);
+void parse_atom(char *res_t);
+void parse_statement();
+
+void parse_tuple_or_expr(char *res_t);
+void parse_call_args(int *argc);
+
+void parse_atom(char *res_t) {
+    if (token_type == TOKEN_NUM) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", token, "_", res_t);
+        next_token();
+    } else if (token_type == TOKEN_STRING) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", token, "_", res_t);
+        next_token();
+    } else if (token_type == TOKEN_TRUE) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", "True", "_", res_t);
+        next_token();
+    } else if (token_type == TOKEN_FALSE) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", "False", "_", res_t);
+        next_token();
+    } else if (token_type == TOKEN_NONE) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", "None", "_", res_t);
+        next_token();
+    } else if (token_type == TOKEN_ELLIPSIS) {
+        get_t(res_t, 32);
+        emit("LOAD_CONST", "...", "_", res_t);
+        next_token();
+    } else if (accept("(")) {
+        if (accept(")")) {
+            get_t(res_t, 32);
+            emit("BUILD_TUPLE", "0", "_", res_t);
+        } else {
+            parse_tuple_or_expr(res_t);
+            expect(")");
+        }
+    } else if (accept("[")) {
+        if (accept("]")) {
+            get_t(res_t, 32);
+            emit("BUILD_LIST", "0", "_", res_t);
+        } else {
+            char elem_t[32];
+            char count_t[16];
+            int count = 0;
+            parse_expression(elem_t);
+            count++;
+            while (accept(",")) {
+                if (accept("]")) {
+                    get_t(res_t, 32);
+                    snprintf(count_t, sizeof(count_t), "%d", count);
+                    emit("BUILD_LIST", count_t, "_", res_t);
+                    return;
+                }
+                char next_t[32];
+                parse_expression(next_t);
+                char res_t2[32];
+                get_t(res_t2, 32);
+                emit("LIST_APPEND", elem_t, next_t, res_t2);
+                strcpy(elem_t, res_t2);
+                count++;
+            }
+            expect("]");
+            get_t(res_t, 32);
+            snprintf(count_t, sizeof(count_t), "%d", count);
+            emit("BUILD_LIST", count_t, "_", res_t);
+        }
+    } else if (accept("{")) {
+        if (accept("}")) {
+            get_t(res_t, 32);
+            emit("BUILD_SET", "0", "_", res_t);
+        } else {
+            char elem_t[32];
+            char count_t[16];
+            int count = 0;
+            parse_expression(elem_t);
+            count++;
+            while (accept(",")) {
+                if (accept("}")) {
+                    get_t(res_t, 32);
+                    snprintf(count_t, sizeof(count_t), "%d", count);
+                    emit("BUILD_SET", count_t, "_", res_t);
+                    return;
+                }
+                char next_t[32];
+                parse_expression(next_t);
+                char res_t2[32];
+                get_t(res_t2, 32);
+                emit("SET_ADD", elem_t, next_t, res_t2);
+                strcpy(elem_t, res_t2);
+                count++;
+            }
+            if (accept(":")) {
+                char val_t[32];
+                parse_expression(val_t);
+                char res_t2[32];
+                get_t(res_t2, 32);
+                emit("DICT_ADD", elem_t, val_t, res_t2);
+                strcpy(elem_t, res_t2);
+                while (accept(",")) {
+                    if (accept("}")) {
+                        get_t(res_t, 32);
+                        emit("BUILD_MAP", "0", "_", res_t);
+                        char map_t[32];
+                        get_t(map_t, 32);
+                        emit("DICT_MERGE", elem_t, "_", map_t);
+                        strcpy(res_t, map_t);
+                        return;
+                    }
+                    char k_t[32], v_t[32];
+                    parse_expression(k_t);
+                    expect(":");
+                    parse_expression(v_t);
+                    char new_t[32];
+                    get_t(new_t, 32);
+                    emit("DICT_ADD", k_t, v_t, new_t);
+                    char merged[32];
+                    get_t(merged, 32);
+                    emit("DICT_MERGE", elem_t, new_t, merged);
+                    strcpy(elem_t, merged);
+                }
+                expect("}");
+                get_t(res_t, 32);
+                emit("BUILD_MAP", "0", "_", res_t);
+                char map_t[32];
+                get_t(map_t, 32);
+                emit("DICT_MERGE", elem_t, "_", map_t);
+                strcpy(res_t, map_t);
+            } else {
+                expect("}");
+                get_t(res_t, 32);
+                snprintf(count_t, sizeof(count_t), "%d", count);
+                emit("BUILD_SET", count_t, "_", res_t);
+            }
+        }
+    } else if (accept("lambda")) {
+        char params[MAX_TOKEN_LEN * 10] = {0};
+        char result_t[32];
+        char lambda_name[64];
+        snprintf(lambda_name, sizeof(lambda_name), "lambda_%d", l_idx++);
+        
+        int saved_in_func = in_function;
+        char saved_params[MAX_PARAMS][MAX_TOKEN_LEN];
+        int saved_param_count = param_count;
+        memcpy(saved_params, func_params, sizeof(func_params));
+        
+        in_function = 1;
+        param_count = 0;
+        
+        if (!accept(":") && token_type != TOKEN_COLON) {
+            if (token_type == TOKEN_NAME) {
+                strcpy(func_params[param_count++], token);
+                next_token();
+                while (accept(",")) {
+                    if (token_type == TOKEN_NAME) {
+                        strcpy(func_params[param_count++], token);
+                        next_token();
+                    }
+                }
+            }
+        }
+        expect(":");
+        parse_expression(result_t);
+        
+        emit("LABEL", lambda_name, "_", "_");
+        emit("RETURN", result_t, "_", "_");
+        
+        in_function = saved_in_func;
+        param_count = saved_param_count;
+        memcpy(func_params, saved_params, sizeof(saved_params));
+        
+        get_t(res_t, 32);
+        emit("LOAD_CLOSURE", lambda_name, "_", res_t);
+    } else if (accept("*")) {
+        char expr_t[32];
+        parse_expression(expr_t);
+        get_t(res_t, 32);
+        emit("STARRED", expr_t, "_", res_t);
+    } else if (token_type == TOKEN_NAME) {
+        char name[MAX_TOKEN_LEN];
+        strcpy(name, token);
+        next_token();
+        
+        int is_param = 0;
+        if (in_function) {
+            for (int i = 0; i < param_count; i++) {
+                if (strcmp(func_params[i], name) == 0) {
+                    is_param = 1;
+                    break;
+                }
+            }
+        }
+        
+        if (token_type == TOKEN_LPAREN || strcmp(token, "(") == 0) {
+            accept("(");
+            int argc = 0;
+            while (!accept(")")) {
+                char arg_t[32];
+                if (accept("*")) {
+                    parse_expression(arg_t);
+                    get_t(arg_t, 32);
+                    emit("STARRED", token, "_", arg_t);
+                } else if (accept("**")) {
+                    parse_expression(arg_t);
+                } else if (token_type == TOKEN_NAME && 
+                          (peek_char() == '=' || (fgetc(in_fp), ungetc('=', in_fp), 0))) {
+                    char kw_name[MAX_TOKEN_LEN];
+                    strcpy(kw_name, token);
+                    next_token();
+                    expect("=");
+                    char val_t[32];
+                    parse_expression(val_t);
+                    char kw_arg_t[32];
+                    get_t(kw_arg_t, 32);
+                    emit("KW_ARG", kw_name, val_t, kw_arg_t);
+                    strcpy(arg_t, kw_arg_t);
+                } else {
+                    parse_expression(arg_t);
+                }
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", argc++);
+                emit("ARG_PUSH", arg_t, idx_str, "_");
+                if (!accept(",") && !accept(")")) break;
+                if (accept(")")) break;
+            }
+            char func_t[32];
+            get_t(func_t, 32);
+            emit("LOAD_NAME", name, "_", func_t);
+            get_t(res_t, 32);
+            char argc_str[16];
+            snprintf(argc_str, sizeof(argc_str), "%d", argc);
+            emit("CALL", func_t, argc_str, res_t);
+        } else if (accept("[")) {
+            char idx_t[32];
+            parse_expression(idx_t);
+            expect("]");
+            
+            char obj_t[32];
+            get_t(obj_t, 32);
+            emit("LOAD_NAME", name, "_", obj_t);
+            get_t(res_t, 32);
+            emit("BINARY_SUBSCR", obj_t, idx_t, res_t);
+            
+            while (accept("[")) {
+                char next_idx_t[32];
+                parse_expression(next_idx_t);
+                expect("]");
+                
+                char new_obj_t[32];
+                get_t(new_obj_t, 32);
+                emit("DUP_TOP", "_", "_", new_obj_t);
+                get_t(res_t, 32);
+                emit("BINARY_SUBSCR", new_obj_t, next_idx_t, res_t);
+            }
+            
+            if (accept("=")) {
+                char val_t[32];
+                parse_expression(val_t);
+                emit("STORE_SUBSCR", res_t, val_t, "_");
+            } else if (token_type == TOKEN_PLUS_EQ || token_type == TOKEN_MINUS_EQ ||
+                       token_type == TOKEN_STAR_EQ || token_type == TOKEN_SLASH_EQ ||
+                       token_type == TOKEN_DOUBLESLASH_EQ || token_type == TOKEN_PERCENT_EQ ||
+                       token_type == TOKEN_DOUBLE_STAR_EQ) {
+                char op[8] = {0};
+                if (token_type == TOKEN_PLUS_EQ) strcpy(op, "+");
+                else if (token_type == TOKEN_MINUS_EQ) strcpy(op, "-");
+                else if (token_type == TOKEN_STAR_EQ) strcpy(op, "*");
+                else if (token_type == TOKEN_SLASH_EQ) strcpy(op, "/");
+                else if (token_type == TOKEN_DOUBLESLASH_EQ) strcpy(op, "//");
+                else if (token_type == TOKEN_PERCENT_EQ) strcpy(op, "%");
+                else if (token_type == TOKEN_DOUBLE_STAR_EQ) strcpy(op, "**");
+                
+                char val_t[32];
+                next_token();
+                parse_expression(val_t);
+                
+                char load_t[32];
+                get_t(load_t, 32);
+                emit("BINARY_SUBSCR", obj_t, idx_t, load_t);
+                
+                char new_val_t[32];
+                get_t(new_val_t, 32);
+                emit(op, load_t, val_t, new_val_t);
+                emit("STORE_SUBSCR", obj_t, idx_t, new_val_t);
+                strcpy(res_t, new_val_t);
+            }
+        } else if (accept(".")) {
+            char attr[MAX_TOKEN_LEN];
+            strcpy(attr, token);
+            next_token();
+            
+            char obj_t[32];
+            get_t(obj_t, 32);
+            emit("LOAD_NAME", name, "_", obj_t);
+            get_t(res_t, 32);
+            emit("LOAD_ATTR", obj_t, attr, res_t);
+            
+            while (accept(".")) {
+                strcpy(attr, token);
+                next_token();
+                char new_obj_t[32];
+                get_t(new_obj_t, 32);
+                emit("LOAD_ATTR", res_t, attr, new_obj_t);
+                strcpy(res_t, new_obj_t);
+            }
+            
+            if (accept("(")) {
+                int argc = 0;
+                while (!accept(")")) {
+                    char arg_t[32];
+                    parse_expression(arg_t);
+                    char idx_str[16];
+                    snprintf(idx_str, sizeof(idx_str), "%d", argc++);
+                    emit("ARG_PUSH", arg_t, idx_str, "_");
+                    if (!accept(",") && !accept(")")) break;
+                    if (accept(")")) break;
+                }
+                char func_t[32];
+                get_t(func_t, 32);
+                emit("DUP_TOP", "_", "_", func_t);
+                char argc_str[16];
+                snprintf(argc_str, sizeof(argc_str), "%d", argc);
+                emit("CALL", func_t, argc_str, res_t);
+            } else if (accept("=")) {
+                char val_t[32];
+                parse_expression(val_t);
+                emit("STORE_ATTR", res_t, val_t, "_");
+            }
+        } else {
+            get_t(res_t, 32);
+            if (is_param) {
+                emit("LOAD_FAST", name, "_", res_t);
+            } else {
+                emit("LOAD_NAME", name, "_", res_t);
+            }
+            
+            while (accept("[")) {
+                char idx_t[32];
+                parse_expression(idx_t);
+                expect("]");
+                char obj_t[32];
+                get_t(obj_t, 32);
+                emit("DUP_TOP", "_", "_", obj_t);
+                get_t(res_t, 32);
+                emit("BINARY_SUBSCR", obj_t, idx_t, res_t);
+            }
+            
+            while (accept(".")) {
+                char attr[MAX_TOKEN_LEN];
+                strcpy(attr, token);
+                next_token();
+                char new_obj_t[32];
+                get_t(new_obj_t, 32);
+                emit("LOAD_ATTR", res_t, attr, new_obj_t);
+                strcpy(res_t, new_obj_t);
+            }
+            
+            if (accept("(")) {
+                int argc = 0;
+                while (!accept(")")) {
+                    char arg_t[32];
+                    parse_expression(arg_t);
+                    char idx_str[16];
+                    snprintf(idx_str, sizeof(idx_str), "%d", argc++);
+                    emit("ARG_PUSH", arg_t, idx_str, "_");
+                    if (!accept(",") && !accept(")")) break;
+                    if (accept(")")) break;
+                }
+                char func_t[32];
+                get_t(func_t, 32);
+                emit("DUP_TOP", "_", "_", func_t);
+                char argc_str[16];
+                snprintf(argc_str, sizeof(argc_str), "%d", argc);
+                emit("CALL", func_t, argc_str, res_t);
+            }
+        }
+    } else {
+        fprintf(stderr, "Syntax error: unexpected token '%s' at line %d\n", token, line_num);
+        exit(1);
+    }
+}
+
+void parse_tuple_or_expr(char *res_t) {
+    char first_t[32];
+    parse_expression(first_t);
+    
+    if (accept(",")) {
+        char elems[MAX_PARAMS][32];
+        int count = 1;
+        strcpy(elems[0], first_t);
+        
+        while (!accept(")") && strcmp(token, ")") != 0) {
+            parse_expression(elems[count++]);
+            if (!accept(",")) break;
+        }
+        
+        char count_str[16];
+        snprintf(count_str, sizeof(count_str), "%d", count);
+        get_t(res_t, 32);
+        
+        if (count == 2) {
+            emit("BUILD_TUPLE", "2", "_", res_t);
+            emit("ROT_TWO", elems[0], elems[1], res_t);
+        } else {
+            emit("BUILD_TUPLE", count_str, "_", res_t);
+            for (int i = 0; i < count; i++) {
+                char idx_str[16];
+                snprintf(idx_str, sizeof(idx_str), "%d", i);
+                char tmp[32];
+                get_t(tmp, 32);
+                emit("LOAD_CONST", idx_str, "_", tmp);
+                char elem_t[32];
+                get_t(elem_t, 32);
+                emit("BINARY_SUBSCR", res_t, tmp, elem_t);
+            }
+        }
+    } else {
+        strcpy(res_t, first_t);
+    }
+}
+
+void parse_primary(char *res_t) {
+    parse_atom(res_t);
+}
+
+void parse_await(char *res_t) {
+    if (accept("await")) {
+        parse_unary(res_t);
+        char tmp[32];
+        get_t(tmp, 32);
+        emit("GET_AWAITABLE", res_t, "_", tmp);
+        strcpy(res_t, tmp);
+    } else {
+        parse_primary(res_t);
+    }
+}
+
+void parse_power(char *res_t) {
+    parse_await(res_t);
+    if (accept("**")) {
+        char rhs_t[32];
+        parse_unary(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("POWER", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_unary(char *res_t) {
+    if (accept("+")) {
+        parse_unary(res_t);
+    } else if (accept("-")) {
+        char rhs_t[32];
+        parse_unary(rhs_t);
+        char zero[32];
+        get_t(zero, 32);
+        emit("LOAD_CONST", "0", "_", zero);
+        get_t(res_t, 32);
+        emit("SUB", zero, rhs_t, res_t);
+    } else if (accept("~")) {
+        char rhs_t[32];
+        parse_unary(rhs_t);
+        get_t(res_t, 32);
+        emit("BITWISE_NOT", rhs_t, "_", res_t);
+    } else if (accept("not")) {
+        parse_not(res_t);
+    } else {
+        parse_power(res_t);
+    }
+}
+
+void parse_mul(char *res_t) {
+    parse_unary(res_t);
+    while (1) {
+        char op[32] = {0};
+        TokenType t = token_type;
+        if (t == TOKEN_STAR) strcpy(op, "MUL");
+        else if (t == TOKEN_SLASH) strcpy(op, "BINARY_TRUE_DIVIDE");
+        else if (t == TOKEN_DOUBLESLASH) strcpy(op, "FLOOR_DIVIDE");
+        else if (t == TOKEN_PERCENT) strcpy(op, "BINARY_MODULO");
+        else if (t == TOKEN_AT) strcpy(op, "MATRIX_MULTIPLY");
+        else break;
+        
+        next_token();
+        char rhs_t[32];
+        parse_unary(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit(op, res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_add(char *res_t) {
+    parse_mul(res_t);
+    while (1) {
+        char op[8] = {0};
+        if (accept("+")) strcpy(op, "ADD");
+        else if (accept("-")) strcpy(op, "SUB");
+        else break;
+        
+        char rhs_t[32];
+        parse_mul(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit(op, res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_shift(char *res_t) {
+    parse_add(res_t);
+    while (1) {
+        char op[32] = {0};
+        if (accept("<<")) strcpy(op, "LEFT_SHIFT");
+        else if (accept(">>")) strcpy(op, "RIGHT_SHIFT");
+        else break;
+        
+        char rhs_t[32];
+        parse_add(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit(op, res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_bitand(char *res_t) {
+    parse_shift(res_t);
+    while (accept("&")) {
+        char rhs_t[32];
+        parse_shift(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("BITAND", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_bitxor(char *res_t) {
+    parse_bitand(res_t);
+    while (accept("^")) {
+        char rhs_t[32];
+        parse_bitand(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("XOR", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_bitor(char *res_t) {
+    parse_bitxor(res_t);
+    while (accept("|")) {
+        char rhs_t[32];
+        parse_bitxor(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("BITOR", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_compare(char *res_t) {
+    parse_bitor(res_t);
+    
+    while (1) {
+        char op[16] = {0};
+        int is_not_in = 0;
+        int is_is_not = 0;
+        
+        if (accept("<")) strcpy(op, "CMP_LT");
+        else if (accept(">")) strcpy(op, "CMP_GT");
+        else if (accept("<=")) strcpy(op, "CMP_LE");
+        else if (accept(">=")) strcpy(op, "CMP_GE");
+        else if (accept("==")) strcpy(op, "CMP_EQ");
+        else if (accept("!=")) strcpy(op, "CMP_NE");
+        else if (accept("in")) {
+            strcpy(op, "CONTAINS_OP");
+            is_not_in = 1;
+        } else if (accept("is")) {
+            if (accept("not")) {
+                strcpy(op, "CMP_IS_NOT");
+                is_is_not = 1;
+            } else {
+                strcpy(op, "CMP_IS");
+            }
+        } else if (accept("not")) {
+            if (accept("in")) {
+                strcpy(op, "CONTAINS_OP");
+                is_not_in = 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+        
+        char rhs_t[32];
+        parse_bitor(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        
+        if (is_not_in) {
+            emit(op, res_t, rhs_t, new_res);
+            emit("UNARY_NOT", new_res, "_", new_res);
+        } else {
+            emit(op, res_t, rhs_t, new_res);
+        }
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_not(char *res_t) {
+    if (accept("not")) {
+        parse_not(res_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("UNARY_NOT", res_t, "_", new_res);
+        strcpy(res_t, new_res);
+    } else {
+        parse_compare(res_t);
+    }
+}
+
+void parse_and(char *res_t) {
+    parse_not(res_t);
+    while (accept("and")) {
+        char rhs_t[32];
+        parse_not(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("BINARY_AND", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_or(char *res_t) {
+    parse_and(res_t);
+    while (accept("or")) {
+        char rhs_t[32];
+        parse_and(rhs_t);
+        char new_res[32];
+        get_t(new_res, 32);
+        emit("BINARY_OR", res_t, rhs_t, new_res);
+        strcpy(res_t, new_res);
+    }
+}
+
+void parse_ternary(char *res_t) {
+    parse_or(res_t);
+}
+
+void parse_walrus(char *res_t) {
+    parse_ternary(res_t);
+    
+    if (accept(":=")) {
+        if (token_type != TOKEN_NAME) {
+            fprintf(stderr, "Syntax error: walrus operator requires a name\n");
+            exit(1);
+        }
+        char name[MAX_TOKEN_LEN];
+        strcpy(name, token);
+        next_token();
+        
+        char val_t[32];
+        parse_ternary(val_t);
+        
+        emit("STORE", val_t, "_", name);
+        strcpy(res_t, val_t);
+    }
+}
+
+void parse_expression(char *res_t) {
+    parse_walrus(res_t);
+}
+
+void parse_simple_stmt() {
+    if (accept("pass")) {
+        emit("POP_TOP", "_", "_", "_");
+    }
+    else if (accept("break")) {
+        if (loop_depth == 0) {
+            fprintf(stderr, "Syntax error: break outside loop at line %d\n", line_num);
+            exit(1);
+        }
+        emit("JUMP", "_", "_", "_");
+    }
+    else if (accept("continue")) {
+        if (loop_depth == 0) {
+            fprintf(stderr, "Syntax error: continue outside loop at line %d\n", line_num);
+            exit(1);
+        }
+        emit("JUMP", "_", "_", "_");
+    }
+    else if (accept("return")) {
+        if (!in_function) {
+            fprintf(stderr, "Syntax error: return outside function at line %d\n", line_num);
+            exit(1);
+        }
+        if (strcmp(token, "EOF") == 0 || strcmp(token, "\n") == 0 ||
+            strcmp(token, ";") == 0 || strcmp(token, "}") == 0 ||
+            strcmp(token, "DEDENT") == 0 || strcmp(token, "elif") == 0 ||
+            strcmp(token, "else") == 0 || strcmp(token, "except") == 0 ||
+            strcmp(token, "finally") == 0) {
+            emit("RETURN", "_", "_", "_");
+        } else {
+            char res_t[32];
+            parse_expression(res_t);
+            emit("RETURN", res_t, "_", "_");
+        }
+    }
+    else if (accept("raise")) {
+        if (strcmp(token, "EOF") == 0 || strcmp(token, "\n") == 0 ||
+            strcmp(token, ";") == 0 || strcmp(token, "}") == 0) {
+            emit("RAISE", "_", "_", "_");
+        } else {
+            char exc_t[32];
+            parse_expression(exc_t);
+            if (accept("from")) {
+                char cause_t[32];
+                parse_expression(cause_t);
+                emit("RAISE_FROM", exc_t, cause_t, "_");
+            } else {
+                emit("RAISE", exc_t, "_", "_");
+            }
+        }
+    }
+    else if (accept("assert")) {
+        char cond_t[32];
+        parse_expression(cond_t);
+        emit("ASSERT", cond_t, "_", "_");
+        if (accept(",")) {
+            char msg_t[32];
+            parse_expression(msg_t);
+            emit("ASSERT_MSG", cond_t, msg_t, "_");
+        }
+    }
+    else if (accept("del")) {
+        if (token_type == TOKEN_NAME) {
+            char name[MAX_TOKEN_LEN];
+            strcpy(name, token);
+            next_token();
+            emit("DELETE_NAME", name, "_", "_");
+        } else if (accept("(")) {
+            char expr_t[32];
+            parse_expression(expr_t);
+            expect(")");
+            emit("DELETE_SUBSCR", expr_t, "_", "_");
+        } else if (accept("[")) {
+            char obj_t[32], idx_t[32];
+            parse_expression(obj_t);
+            expect("]");
+            emit("DELETE_SUBSCR", obj_t, idx_t, "_");
+        }
+    }
+    else if (accept("global")) {
+        if (token_type == TOKEN_NAME) {
+            next_token();
+            while (accept(",")) {
+                if (token_type == TOKEN_NAME) next_token();
+            }
+        }
+    }
+    else if (accept("nonlocal")) {
+        if (token_type == TOKEN_NAME) {
+            next_token();
+            while (accept(",")) {
+                if (token_type == TOKEN_NAME) next_token();
+            }
+        }
+    }
+    else if (accept("import")) {
+        if (token_type == TOKEN_NAME) {
+            char module[MAX_TOKEN_LEN];
+            strcpy(module, token);
+            next_token();
+            emit("IMPORT", module, "_", "_");
+            if (accept("as")) {
+                char alias[MAX_TOKEN_LEN];
+                strcpy(alias, token);
+                next_token();
+                emit("IMPORT_AS", module, alias, "_");
+            }
+            while (accept(",")) {
+                if (token_type == TOKEN_NAME) {
+                    strcpy(module, token);
+                    next_token();
+                    emit("IMPORT", module, "_", "_");
+                    if (accept("as")) {
+                        char alias[MAX_TOKEN_LEN];
+                        strcpy(alias, token);
+                        next_token();
+                        emit("IMPORT_AS", module, alias, "_");
+                    }
+                }
+            }
+        }
+    }
+    else if (accept("from")) {
+        int dots = 0;
+        while (accept(".")) dots++;
+
+        char module[MAX_TOKEN_LEN] = {0};
+        if (token_type == TOKEN_NAME) {
+            strcpy(module, token);
+            next_token();
+            while (accept(".")) {
+                strcat(module, ".");
+                strcat(module, token);
+                next_token();
+            }
+        }
+        
+        expect("import");
+        
+        if (accept("*")) {
+            emit("IMPORT_STAR", module, "_", "_");
+        } else if (accept("(")) {
+            while (!accept(")")) {
+                if (token_type == TOKEN_NAME) {
+                    char name[MAX_TOKEN_LEN];
+                    strcpy(name, token);
+                    next_token();
+                    if (accept("as")) {
+                        char alias[MAX_TOKEN_LEN];
+                        strcpy(alias, token);
+                        next_token();
+                        emit("FROM_IMPORT_AS", module, name, alias);
+                    } else {
+                        emit("FROM_IMPORT", module, name, "_");
+                    }
+                }
+                if (!accept(",") && !accept(")")) break;
+            }
+        } else {
+            while (1) {
+                if (token_type == TOKEN_NAME) {
+                    char name[MAX_TOKEN_LEN];
+                    strcpy(name, token);
+                    next_token();
+                    if (accept("as")) {
+                        char alias[MAX_TOKEN_LEN];
+                        strcpy(alias, token);
+                        next_token();
+                        emit("FROM_IMPORT_AS", module, name, alias);
+                    } else {
+                        emit("FROM_IMPORT", module, name, "_");
+                    }
+                }
+                if (!accept(",")) break;
+            }
+        }
+    }
+    else {
+        char target_t[32];
+        
+        if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0 ||
+            strcmp(token, "except") == 0 || strcmp(token, "finally") == 0 ||
+            strcmp(token, "DEDENT") == 0 || strcmp(token, "EOF") == 0) {
+            return;
+        }
+        
+        if (token_type == TOKEN_NAME) {
+            char name[MAX_TOKEN_LEN];
+            strcpy(name, token);
+            next_token();
+            
+            if (accept("=")) {
+                char expr_t[32];
+                parse_expression(expr_t);
+                emit("STORE", expr_t, "_", name);
+                
+                while (accept(",")) {
+                    if (token_type != TOKEN_NAME) {
+                        fprintf(stderr, "Syntax error: expected name in assignment\n");
+                        exit(1);
+                    }
+                    strcpy(name, token);
+                    next_token();
+                    if (accept("=")) {
+                        parse_expression(expr_t);
+                        emit("STORE", expr_t, "_", name);
+                    } else if (accept(":=")) {
+                        parse_expression(expr_t);
+                        emit("STORE", expr_t, "_", name);
+                    } else {
+                        fprintf(stderr, "Syntax error: expected '=' in assignment\n");
+                        exit(1);
+                    }
+                }
+                return;
+            }
+            else if (accept(":=")) {
+                char expr_t[32];
+                parse_expression(expr_t);
+                emit("STORE", expr_t, "_", name);
+                return;
+            }
+            else if (token_type == TOKEN_PLUS_EQ || token_type == TOKEN_MINUS_EQ ||
+                     token_type == TOKEN_STAR_EQ || token_type == TOKEN_SLASH_EQ ||
+                     token_type == TOKEN_DOUBLESLASH_EQ || token_type == TOKEN_PERCENT_EQ ||
+                     token_type == TOKEN_AT_EQ || token_type == TOKEN_AMPERSAND_EQ ||
+                     token_type == TOKEN_PIPE_EQ || token_type == TOKEN_CARET_EQ ||
+                     token_type == TOKEN_LSHIFT_EQ || token_type == TOKEN_RSHIFT_EQ ||
+                     token_type == TOKEN_DOUBLE_STAR_EQ) {
+                
+                char op[8] = {0};
+                if (token_type == TOKEN_PLUS_EQ) strcpy(op, "+");
+                else if (token_type == TOKEN_MINUS_EQ) strcpy(op, "-");
+                else if (token_type == TOKEN_STAR_EQ) strcpy(op, "*");
+                else if (token_type == TOKEN_SLASH_EQ) strcpy(op, "/");
+                else if (token_type == TOKEN_DOUBLESLASH_EQ) strcpy(op, "//");
+                else if (token_type == TOKEN_PERCENT_EQ) strcpy(op, "%");
+                else if (token_type == TOKEN_AT_EQ) strcpy(op, "@");
+                else if (token_type == TOKEN_AMPERSAND_EQ) strcpy(op, "&");
+                else if (token_type == TOKEN_PIPE_EQ) strcpy(op, "|");
+                else if (token_type == TOKEN_CARET_EQ) strcpy(op, "^");
+                else if (token_type == TOKEN_LSHIFT_EQ) strcpy(op, "<<");
+                else if (token_type == TOKEN_RSHIFT_EQ) strcpy(op, ">>");
+                else if (token_type == TOKEN_DOUBLE_STAR_EQ) strcpy(op, "**");
+                
+                next_token();
+                char rhs_t[32];
+                parse_expression(rhs_t);
+                
+                char lhs_t[32];
+                get_t(lhs_t, 32);
+                emit("LOAD_NAME", name, "_", lhs_t);
+                
+                char new_val_t[32];
+                get_t(new_val_t, 32);
+                emit(op, lhs_t, rhs_t, new_val_t);
+                emit("STORE", new_val_t, "_", name);
+                strcpy(target_t, new_val_t);
+                return;
+            }
+            else if (accept("(")) {
+                int argc = 0;
+                int loop_count = 0;
+                while (strcmp(token, ")") != 0 && strcmp(token, "DEDENT") != 0 &&
+                       strcmp(token, "elif") != 0 && strcmp(token, "else") != 0 &&
+                       strcmp(token, "EOF") != 0) {
+                    if (loop_count++ > 100) { fprintf(stderr, "DEBUG: infinite loop in func call\n"); exit(1); }
+                    if (strcmp(token, "\n") == 0) { next_token(); continue; }
+                    char arg_t[32];
+                    parse_expression(arg_t);
+                    char idx_str[16];
+                    snprintf(idx_str, sizeof(idx_str), "%d", argc++);
+                    emit("ARG_PUSH", arg_t, idx_str, "_");
+                    if (accept(",")) continue;
+                    if (strcmp(token, ")") == 0) break;
+                }
+                if (strcmp(token, ")") == 0) next_token();
+                char func_t[32];
+                get_t(func_t, 32);
+                emit("LOAD_NAME", name, "_", func_t);
+                get_t(target_t, 32);
+                char argc_str[16];
+                snprintf(argc_str, sizeof(argc_str), "%d", argc);
+                emit("CALL", func_t, argc_str, target_t);
+                emit("POP_TOP", target_t, "_", "_");
+                return;
+            }
+            else if (accept("[")) {
+                char obj_t[32];
+                get_t(obj_t, 32);
+                emit("LOAD_NAME", name, "_", obj_t);
+                
+                char idx_t[32];
+                parse_expression(idx_t);
+                expect("]");
+                
+                char load_t[32];
+                get_t(load_t, 32);
+                emit("BINARY_SUBSCR", obj_t, idx_t, load_t);
+                
+                if (accept("=")) {
+                    char val_t[32];
+                    parse_expression(val_t);
+                    emit("STORE_SUBSCR", obj_t, val_t, "_");
+                } else {
+                    fprintf(stderr, "Syntax error: expected '=' after subscript\n");
+                    exit(1);
+                }
+                return;
+            }
+            else if (accept(".")) {
+                char attr[MAX_TOKEN_LEN];
+                strcpy(attr, token);
+                next_token();
+                
+                char obj_t[32];
+                get_t(obj_t, 32);
+                emit("LOAD_NAME", name, "_", obj_t);
+                char attr_t[32];
+                get_t(attr_t, 32);
+                emit("LOAD_ATTR", obj_t, attr, attr_t);
+                
+                if (accept("=")) {
+                    char val_t[32];
+                    parse_expression(val_t);
+                    emit("STORE_ATTR", attr_t, val_t, "_");
+                }
+                return;
+            }
+            else {
+                get_t(target_t, 32);
+                emit("LOAD_NAME", name, "_", target_t);
+                emit("POP_TOP", target_t, "_", "_");
+                return;
+            }
+        }
+        else if (accept("(")) {
+            parse_tuple_or_expr(target_t);
+            expect(")");
+            emit("POP_TOP", target_t, "_", "_");
+        }
+        else if (accept("[")) {
+            parse_expression(target_t);
+            expect("]");
+            emit("POP_TOP", target_t, "_", "_");
+        }
+        else if (accept("{")) {
+            parse_expression(target_t);
+            expect("}");
+            emit("POP_TOP", target_t, "_", "_");
+        }
+        else {
+            parse_expression(target_t);
+            emit("POP_TOP", target_t, "_", "_");
+        }
+    }
+}
+
+void parse_block();
+
+void parse_statement() {
+    if (accept("def")) {
+        char func_name[MAX_TOKEN_LEN];
+        strcpy(func_name, token);
+        next_token();
+        
+        int saved_in_func = in_function;
+        char saved_params[MAX_PARAMS][MAX_TOKEN_LEN];
+        int saved_param_count = param_count;
+        memcpy(saved_params, func_params, sizeof(func_params));
+        
+        in_function = 1;
+        param_count = 0;
+        
+        expect("(");
+        
+        if (!accept(")")) {
+            if (token_type == TOKEN_NAME) {
+                strcpy(func_params[param_count++], token);
+                next_token();
+                
+                while (accept(",")) {
+                    if (accept(")")) break;
+                    if (token_type == TOKEN_NAME) {
+                        strcpy(func_params[param_count++], token);
+                        next_token();
+                    } else if (accept("*")) {
+                        if (token_type == TOKEN_NAME) {
+                            strcpy(func_params[param_count++], token);
+                            next_token();
+                        }
+                        if (accept(",")) {
+                            if (token_type == TOKEN_NAME) {
+                                strcpy(func_params[param_count++], token);
+                                next_token();
+                            }
+                        }
+                    } else if (accept("**")) {
+                        if (token_type == TOKEN_NAME) {
+                            strcpy(func_params[param_count++], token);
+                            next_token();
+                        }
+                    }
+                }
+            }
+            expect(")");
+        }
+        
+        if (accept("->")) {
+            parse_expression(token);
+        }
+        
+        expect(":");
+        expect("INDENT");
+        
+        emit("LABEL", func_name, "_", "_");
+        
+        while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+            parse_statement();
+        }
+        
+        emit("RETURN", "_", "_", "_");
+        
+        in_function = saved_in_func;
+        param_count = saved_param_count;
+        memcpy(func_params, saved_params, sizeof(func_params));
+    }
+    else if (accept("class")) {
+        char class_name[MAX_TOKEN_LEN];
+        strcpy(class_name, token);
+        next_token();
+        
+        int saved_in_class = in_class;
+        in_class = 1;
+        
+        if (accept("(")) {
+            if (!accept(")")) {
+                parse_expression(token);
+                expect(")");
+            }
+        }
+        expect(":");
+        expect("INDENT");
+        
+        emit("CLASS", class_name, "_", "_");
+        
+        while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+            if (accept("def")) {
+                char method_name[MAX_TOKEN_LEN];
+                strcpy(method_name, token);
+                next_token();
+                
+                int saved_in_func = in_function;
+                char saved_params[MAX_PARAMS][MAX_TOKEN_LEN];
+                int saved_param_count = param_count;
+                memcpy(saved_params, func_params, sizeof(func_params));
+                
+                in_function = 1;
+                param_count = 0;
+                
+                expect("(");
+                if (!accept(")")) {
+                    if (token_type == TOKEN_NAME) {
+                        strcpy(func_params[param_count++], token);
+                        next_token();
+                        while (accept(",")) {
+                            if (accept(")")) break;
+                            if (token_type == TOKEN_NAME) {
+                                strcpy(func_params[param_count++], token);
+                                next_token();
+                            }
+                        }
+                    }
+                    expect(")");
+                }
+                
+                expect(":");
+                expect("INDENT");
+                
+                char full_name[MAX_TOKEN_LEN];
+                snprintf(full_name, sizeof(full_name), "%s.%s", class_name, method_name);
+                emit("LABEL", full_name, "_", "_");
+                
+                while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                    parse_statement();
+                }
+                
+                emit("RETURN", "_", "_", "_");
+                
+                in_function = saved_in_func;
+                param_count = saved_param_count;
+                memcpy(func_params, saved_params, sizeof(func_params));
+            } else {
+                parse_statement();
+            }
+        }
+        
+        in_class = saved_in_class;
+    }
+    else if (accept("if")) {
+        char cond_t[32];
+        parse_expression(cond_t);
+        expect(":");
+        
+        char l_elif[MAX_STACK][32];
+        char l_else[32];
+        char l_end[32];
+        int elif_count = 0;
+        
+        get_l(l_else, 32);
+        get_l(l_end, 32);
+        
+        emit("BRANCH_IF_FALSE", cond_t, "_", l_else);
+        
+        int prev_line = line_num;
+        next_token();
+        while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+        
+        while (line_num > prev_line) {
+            if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0 || 
+                strcmp(token, "DEDENT") == 0 || strcmp(token, "EOF") == 0) {
+                break;
+            }
+            parse_statement();
+            while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+            if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0) break;
+        }
+        
+        emit("JUMP", l_end, "_", "_");
+        emit("LABEL", l_else, "_", "_");
+        
+        if (accept("elif")) {
+            parse_expression(cond_t);
+            expect(":");
+            
+            char l_next[32];
+            get_l(l_next, 32);
+            
+            emit("BRANCH_IF_FALSE", cond_t, "_", l_next);
+            
+            prev_line = line_num;
+            next_token();
+            while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+            
+            while (line_num > prev_line) {
+                if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0 || 
+                    strcmp(token, "DEDENT") == 0 || strcmp(token, "EOF") == 0) {
+                    break;
+                }
+                parse_statement();
+                while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+                if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0) break;
+            }
+            
+            emit("JUMP", l_end, "_", "_");
+            emit("LABEL", l_next, "_", "_");
+            
+            if (accept("elif")) {
+                parse_expression(cond_t);
+                expect(":");
+                
+                char l_next2[32];
+                get_l(l_next2, 32);
+                
+                emit("BRANCH_IF_FALSE", cond_t, "_", l_next2);
+                
+                prev_line = line_num;
+                next_token();
+                while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+                
+                while (line_num > prev_line) {
+                    if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0 || 
+                        strcmp(token, "DEDENT") == 0 || strcmp(token, "EOF") == 0) {
+                        break;
+                    }
+                    parse_statement();
+                    while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+                    if (strcmp(token, "elif") == 0 || strcmp(token, "else") == 0) break;
+                }
+                
+                emit("JUMP", l_end, "_", "_");
+                emit("LABEL", l_next2, "_", "_");
+            }
+        }
+        
+        if (accept("else")) {
+            expect(":");
+            prev_line = line_num;
+            next_token();
+            while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+            
+            while (line_num > prev_line) {
+                if (strcmp(token, "DEDENT") == 0 || strcmp(token, "EOF") == 0) break;
+                parse_statement();
+                while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) next_token();
+            }
+        }
+        
+        emit("LABEL", l_end, "_", "_");
+    }
+    else if (accept("while")) {
+        char l_start[32], l_end[32];
+        get_l(l_start, 32);
+        get_l(l_end, 32);
+        
+        emit("LABEL", l_start, "_", "_");
+        
+        char cond_t[32];
+        parse_expression(cond_t);
+        expect(":");
+        
+        emit("BRANCH_IF_FALSE", cond_t, "_", l_end);
+        
+        loop_depth++;
+        
+        expect("INDENT");
+        while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+            parse_statement();
+        }
+        
+        loop_depth--;
+        
+        emit("JUMP", l_start, "_", "_");
+        emit("LABEL", l_end, "_", "_");
+    }
+    else if (accept("for")) {
+        char var_name[MAX_TOKEN_LEN];
+        strcpy(var_name, token);
+        next_token();
+        
+        expect("in");
+        
+        char iter_t[32];
+        parse_expression(iter_t);
+        expect(":");
+        
+        char l_start[32], l_end[32];
+        get_l(l_start, 32);
+        get_l(l_end, 32);
+        
+        emit("GET_ITER", iter_t, "_", "_");
+        emit("LABEL", l_start, "_", "_");
+        
+        char item_t[32];
+        get_t(item_t, 32);
+        emit("FOR_ITER", "_", "_", item_t);
+        emit("BRANCH_IF_FALSE", item_t, "_", l_end);
+        emit("STORE", item_t, "_", var_name);
+        
+        loop_depth++;
+        
+        expect("INDENT");
+        while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+            parse_statement();
+        }
+        
+        loop_depth--;
+        
+        emit("JUMP", l_start, "_", "_");
+        emit("LABEL", l_end, "_", "_");
+        
+        if (accept("else")) {
+            expect(":");
+            expect("INDENT");
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                parse_statement();
+            }
+        }
+    }
+    else if (accept("try")) {
+        char l_except[MAX_STACK][32];
+        char l_else[32];
+        char l_finally[32];
+        int except_count = 0;
+        int has_else = 0;
+        int has_finally = 0;
+        
+        expect(":");
+        expect("INDENT");
+        
+        while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+            if (strcmp(token, "except") == 0) break;
+            parse_statement();
+        }
+        
+        if (accept("except")) {
+            get_l(l_except[except_count++], 32);
+            
+            if (token_type == TOKEN_NAME) {
+                next_token();
+                if (accept("as")) {
+                    char exc_var[MAX_TOKEN_LEN];
+                    strcpy(exc_var, token);
+                    next_token();
+                }
+            }
+            expect(":");
+            expect("INDENT");
+            
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                if (strcmp(token, "except") == 0 || strcmp(token, "else") == 0 || 
+                    strcmp(token, "finally") == 0) break;
+                parse_statement();
+            }
+        }
+        
+        if (accept("else")) {
+            has_else = 1;
+            get_l(l_else, 32);
+            expect(":");
+            expect("INDENT");
+            
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                if (strcmp(token, "finally") == 0) break;
+                parse_statement();
+            }
+        }
+        
+        if (accept("finally")) {
+            has_finally = 1;
+            get_l(l_finally, 32);
+            expect(":");
+            expect("INDENT");
+            
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                parse_statement();
+            }
+        }
+    }
+    else if (accept("with")) {
+        if (token_type == TOKEN_NAME) {
+            char expr_t[32];
+            parse_expression(expr_t);
+            
+            char ctx_var[MAX_TOKEN_LEN];
+            if (accept("as")) {
+                strcpy(ctx_var, token);
+                next_token();
+                emit("STORE", expr_t, "_", ctx_var);
+            }
+            expect(":");
+            expect("INDENT");
+            
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                parse_statement();
+            }
+        }
+    }
+    else if (accept("@")) {
+        char decorator_name[MAX_TOKEN_LEN];
+        strcpy(decorator_name, token);
+        next_token();
+        emit("DECORATOR", decorator_name, "_", "_");
+        
+        while (accept("@")) {
+            strcpy(decorator_name, token);
+            next_token();
+            emit("DECORATOR", decorator_name, "_", "_");
+        }
+        
+        parse_statement();
+    }
+    else if (accept("async")) {
+        if (accept("def")) {
+            char func_name[MAX_TOKEN_LEN];
+            strcpy(func_name, token);
+            next_token();
+            
+            int saved_in_func = in_function;
+            in_function = 1;
+            param_count = 0;
+            
+            expect("(");
+            if (!accept(")")) {
+                if (token_type == TOKEN_NAME) {
+                    strcpy(func_params[param_count++], token);
+                    next_token();
+                    while (accept(",")) {
+                        if (accept(")")) break;
+                        if (token_type == TOKEN_NAME) {
+                            strcpy(func_params[param_count++], token);
+                            next_token();
+                        }
+                    }
+                }
+                expect(")");
+            }
+            
+            expect(":");
+            expect("INDENT");
+            
+            emit("LABEL", func_name, "_", "_");
+            
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                parse_statement();
+            }
+            
+            emit("RETURN", "_", "_", "_");
+            
+            in_function = saved_in_func;
+        } else if (accept("for")) {
+            char var_name[MAX_TOKEN_LEN];
+            strcpy(var_name, token);
+            next_token();
+            expect("in");
+            char iter_t[32];
+            parse_expression(iter_t);
+            expect(":");
+            
+            char l_start[32], l_end[32];
+            get_l(l_start, 32);
+            get_l(l_end, 32);
+            
+            emit("GET_AITER", iter_t, "_", "_");
+            emit("LABEL", l_start, "_", "_");
+            
+            char item_t[32];
+            get_t(item_t, 32);
+            emit("ANEXT", "_", "_", item_t);
+            emit("BRANCH_IF_FALSE", item_t, "_", l_end);
+            emit("STORE", item_t, "_", var_name);
+            
+            loop_depth++;
+            expect("INDENT");
+            while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                parse_statement();
+            }
+            loop_depth--;
+            
+            emit("JUMP", l_start, "_", "_");
+            emit("LABEL", l_end, "_", "_");
+        } else if (accept("with")) {
+            if (token_type == TOKEN_NAME) {
+                char expr_t[32];
+                parse_expression(expr_t);
+                expect(":");
+                expect("INDENT");
+                
+                while (!accept("DEDENT") && strcmp(token, "EOF") != 0) {
+                    parse_statement();
+                }
+            }
+        }
+    }
+    else {
+        parse_simple_stmt();
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 4) {
+        printf("Usage: ./py0c input.py -o output.qd\n");
+        return 1;
+    }
+    
+    in_fp = fopen(argv[1], "r");
+    out_fp = fopen(argv[3], "w");
+    if (!in_fp || !out_fp) {
+        perror("File open failed");
+        return 1;
+    }
+    
+    indent_stack[0] = 0;
+    
+    next_token();
+    while (strcmp(token, "EOF") != 0) {
+        while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0) {
+            next_token();
+        }
+        
+        if (strcmp(token, "EOF") == 0) break;
+        
+        if (strcmp(token, "DEDENT") == 0) {
+            next_token();
+            continue;
+        }
+        
+        if (accept("@")) {
+            char decorator_name[MAX_TOKEN_LEN];
+            strcpy(decorator_name, token);
+            next_token();
+            emit("DECORATOR", decorator_name, "_", "_");
+            continue;
+        }
+        
+        parse_statement();
+        
+        while (strcmp(token, "\n") == 0 || strcmp(token, ";") == 0 ||
+               strcmp(token, "INDENT") == 0 || strcmp(token, "DEDENT") == 0) {
+            if (strcmp(token, "DEDENT") == 0 || strcmp(token, "INDENT") == 0) {
+                next_token();
+                break;
+            }
+            next_token();
+        }
+    }
+    
+    emit("HALT", "_", "_", "_");
+    
+    fclose(in_fp);
+    fclose(out_fp);
+    return 0;
+}
