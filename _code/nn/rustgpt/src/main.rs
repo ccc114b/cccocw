@@ -475,7 +475,7 @@ fn main() {
     }
     
     println!("\n--- inference (new, hallucinated names) ---");
-    let temperature = 1.5;
+    let temperature = 0.5;
     
     for sample_idx in 0..20 {
         let mut keys: Vec<Vec<Vec<usize>>> = vec![vec![]; N_LAYER];
@@ -503,22 +503,15 @@ fn main() {
             }
             let probs: Vec<usize> = exps.iter().map(|e| div(*e, total_handle, &mut pool)).collect();
             
-            let mut weights: Vec<(usize, f64)> = probs.iter().enumerate()
-                .map(|(i, p)| (i, pool.get(*p).data))
-                .collect();
-            weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            let top_k = 5;
-            let top_weights: Vec<f64> = weights.iter().take(top_k).map(|(_, w)| *w).collect();
-            let top_indices: Vec<usize> = weights.iter().take(top_k).map(|(i, _)| *i).collect();
-            
-            let sum: f64 = top_weights.iter().sum();
+            let weights: Vec<f64> = probs.iter().map(|p| pool.get(*p).data).collect();
+            let sum: f64 = weights.iter().sum();
             let r: f64 = rng.gen::<f64>() * sum;
             let mut cum = 0.0;
             let mut new_token_id = 0;
-            for (i, &w) in top_weights.iter().enumerate() {
+            for (i, &w) in weights.iter().enumerate() {
                 cum += w;
                 if r <= cum {
-                    new_token_id = top_indices[i];
+                    new_token_id = i;
                     break;
                 }
             }

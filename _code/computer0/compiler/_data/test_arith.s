@@ -21,31 +21,19 @@ main:                                   # @main
 	lw	a1, -28(s0)
 	addw	a0, a0, a1
 	sw	a0, -32(s0)
-	lw	a0, -24(s0)
-	lw	a1, -28(s0)
-	subw	a0, a0, a1
-	sw	a0, -36(s0)
-	lw	a0, -24(s0)
-	lw	a1, -28(s0)
-	mulw	a0, a0, a1
-	sw	a0, -40(s0)
-	lw	a0, -24(s0)
-	lw	a1, -28(s0)
-	divw	a0, a0, a1
-	sw	a0, -44(s0)
-	lw	a0, -24(s0)
-	lw	a1, -28(s0)
-	remw	a0, a0, a1
-	sw	a0, -48(s0)
 	lw	a0, -32(s0)
-	lw	a1, -36(s0)
+	slliw	a0, a0, 1
+	sw	a0, -36(s0)
+	lw	a0, -36(s0)
+	lui	a1, 349525
+	addi	a1, a1, 1366
+	mul	a0, a0, a1
+	srli	a1, a0, 63
+	srli	a0, a0, 32
 	addw	a0, a0, a1
-	lw	a1, -40(s0)
-	addw	a0, a0, a1
-	lw	a1, -44(s0)
-	addw	a0, a0, a1
-	lw	a1, -48(s0)
-	addw	a0, a0, a1
+	sw	a0, -40(s0)
+	lw	a0, -40(s0)
+	addiw	a0, a0, 20
 	ld	ra, 40(sp)                      # 8-byte Folded Reload
 	ld	s0, 32(sp)                      # 8-byte Folded Reload
 	addi	sp, sp, 48

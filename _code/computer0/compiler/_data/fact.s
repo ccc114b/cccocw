@@ -52,11 +52,8 @@ main:                                   # @main
 	li	a0, 0
 	sw	a0, -20(s0)
 	li	a0, 5
-	sw	a0, -24(s0)
-	lw	a0, -24(s0)
 	call	factorial
-	sd	a0, -32(s0)
-	lw	a0, -32(s0)
+	sext.w	a0, a0
 	ld	ra, 24(sp)                      # 8-byte Folded Reload
 	ld	s0, 16(sp)                      # 8-byte Folded Reload
 	addi	sp, sp, 32

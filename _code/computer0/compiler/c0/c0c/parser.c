@@ -1,1389 +1,1161 @@
 #include "parser.h"
-#include "lexer.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <assert.h>
+
+/* ---------------------------------------------------------------- symbol table (typedef tracking) */
+
+#define MAX_TYPEDEFS 512
+#define MAX_ENUM_CONSTS 1024
+#define MAX_STRUCT_DEFS 256
 
 typedef struct {
-    char name[64];
-    CType ty;
-    int array_len;
-    int struct_id;
-} Sym;
-
-static Sym symtab[256];
-static int sym_cnt = 0;
+    char *name;
+    Type *type;
+} TypedefEntry;
 
 typedef struct {
-    char name[64];
-    CType ret;
-    int ret_struct_id;
-    CType params[16];
-    int param_struct_id[16];
-    int param_cnt;
-} FuncSym;
-
-static FuncSym func_tab[128];
-static int func_cnt = 0;
-static CType current_func_ret = TY_INT;
-static int last_struct_id = -1;
-
-static FuncSym* func_find(const char *name);
+    char    *name;
+    long long value;
+} EnumConst;
 
 typedef struct {
-    char name[64];
-    CType ty;
-    int struct_id;
-} TypedefSym;
+    char *name;
+    Type *type;
+} StructEntry;
 
-static TypedefSym typedef_tab[128];
-static int typedef_cnt = 0;
+struct Parser {
+    Lexer         *lexer;
+    Token          cur;
+    TypedefEntry **typedefs;
+    int            n_typedefs;
+    EnumConst    **enum_consts;
+    int            n_enum_consts;
+    StructEntry  **structs;
+    int            n_structs;
+};
 
-typedef struct {
-    char name[64];
-    int struct_id;
-} StructSym;
-
-static StructSym struct_tab[64];
-static int struct_sym_cnt = 0;
-
-typedef struct {
-    char name[64];
-    CType ty;
-    int array_len;
-    int struct_id;
-} GlobalSym;
-
-static GlobalSym gsymtab[256];
-static int gsym_cnt = 0;
-
-static void sym_reset(void) { sym_cnt = 0; }
-
-static void sym_add(const char *name, CType ty, int array_len, int struct_id) {
-    if (sym_cnt >= 256) error("符號表已滿");
-    strcpy(symtab[sym_cnt].name, name);
-    symtab[sym_cnt].ty = ty;
-    symtab[sym_cnt].array_len = array_len;
-    symtab[sym_cnt].struct_id = struct_id;
-    sym_cnt++;
+static void register_enum_const(Parser *p, const char *name, long long val) {
+    if (p->n_enum_consts >= MAX_ENUM_CONSTS) return;
+    EnumConst *ec = calloc(1, sizeof(EnumConst));
+    ec->name  = strdup(name);
+    ec->value = val;
+    p->enum_consts[p->n_enum_consts++] = ec;
 }
 
-static int global_find_index(const char *name) {
-    for (int i = gsym_cnt - 1; i >= 0; i--) {
-        if (strcmp(gsymtab[i].name, name) == 0) return i;
-    }
-    return -1;
-}
-
-static void global_add(const char *name, CType ty, int array_len, int struct_id) {
-    if (gsym_cnt >= 256) error("全域符號表已滿");
-    if (global_find_index(name) >= 0) error("全域變數重複定義");
-    if (func_find(name)) error("全域變數名稱與函式衝突");
-    strcpy(gsymtab[gsym_cnt].name, name);
-    gsymtab[gsym_cnt].ty = ty;
-    gsymtab[gsym_cnt].array_len = array_len;
-    gsymtab[gsym_cnt].struct_id = struct_id;
-    gsym_cnt++;
-}
-
-static void func_add(const char *name, CType ret, int ret_struct_id,
-                     CType *params, int *param_struct_id, int param_cnt) {
-    if (func_cnt >= 128) error("函式表已滿");
-    for (int i = 0; i < func_cnt; i++) {
-        if (strcmp(func_tab[i].name, name) == 0) {
-            if (func_tab[i].ret != ret || func_tab[i].param_cnt != param_cnt) {
-                error("函式宣告不一致");
-            }
-            if (func_tab[i].ret_struct_id != ret_struct_id) error("函式回傳型別不一致");
-            for (int j = 0; j < param_cnt; j++) {
-                if (func_tab[i].params[j] != params[j]) error("函式參數型別不一致");
-                if (func_tab[i].param_struct_id[j] != param_struct_id[j]) error("函式參數型別不一致");
-            }
-            return;
-        }
-    }
-    if (global_find_index(name) >= 0) error("函式名稱與全域變數衝突");
-    strcpy(func_tab[func_cnt].name, name);
-    func_tab[func_cnt].ret = ret;
-    func_tab[func_cnt].ret_struct_id = ret_struct_id;
-    func_tab[func_cnt].param_cnt = param_cnt;
-    for (int i = 0; i < param_cnt; i++) {
-        func_tab[func_cnt].params[i] = params[i];
-        func_tab[func_cnt].param_struct_id[i] = param_struct_id[i];
-    }
-    func_cnt++;
-}
-
-static FuncSym* func_find(const char *name) {
-    for (int i = 0; i < func_cnt; i++) {
-        if (strcmp(func_tab[i].name, name) == 0) return &func_tab[i];
-    }
-    return NULL;
-}
-
-static void typedef_add(const char *name, CType ty, int struct_id) {
-    if (typedef_cnt >= 128) error("typedef 表已滿");
-    strcpy(typedef_tab[typedef_cnt].name, name);
-    typedef_tab[typedef_cnt].ty = ty;
-    typedef_tab[typedef_cnt].struct_id = struct_id;
-    typedef_cnt++;
-}
-
-static int typedef_find(const char *name, CType *ty, int *struct_id) {
-    for (int i = typedef_cnt - 1; i >= 0; i--) {
-        if (strcmp(typedef_tab[i].name, name) == 0) {
-            *ty = typedef_tab[i].ty;
-            *struct_id = typedef_tab[i].struct_id;
+static int lookup_enum_const(Parser *p, const char *name, long long *out) {
+    for (int i = 0; i < p->n_enum_consts; i++) {
+        EnumConst *ec = p->enum_consts[i];
+        if (ec && strcmp(ec->name, name) == 0) {
+            *out = ec->value;
             return 1;
         }
     }
     return 0;
 }
 
-static int struct_find(const char *name) {
-    for (int i = 0; i < struct_sym_cnt; i++) {
-        if (strcmp(struct_tab[i].name, name) == 0) return struct_tab[i].struct_id;
-    }
-    return -1;
+static void register_struct(Parser *p, const char *name, Type *t) {
+    if (p->n_structs >= MAX_STRUCT_DEFS) return;
+    StructEntry *se = calloc(1, sizeof(StructEntry));
+    se->name = strdup(name);
+    se->type = t;
+    p->structs[p->n_structs++] = se;
 }
 
-static int add_struct_def(const char *name) {
-    if (g_struct_def_cnt >= 64) error("struct 定義過多");
-    int id = g_struct_def_cnt++;
-    strcpy(g_struct_defs[id].name, name);
-    g_struct_defs[id].size = 0;
-    g_struct_defs[id].field_cnt = 0;
-    if (struct_sym_cnt < 64) {
-        strcpy(struct_tab[struct_sym_cnt].name, name);
-        struct_tab[struct_sym_cnt].struct_id = id;
-        struct_sym_cnt++;
+static Type *lookup_struct(Parser *p, const char *name) {
+    for (int i = p->n_structs - 1; i >= 0; i--) {
+        StructEntry *se = p->structs[i];
+        if (se && strcmp(se->name, name) == 0)
+            return se->type;
     }
-    return id;
-}
-
-static StructDef* get_struct_def(int id) {
-    if (id < 0 || id >= g_struct_def_cnt) error("struct id 錯誤");
-    return &g_struct_defs[id];
-}
-
-static int type_size(CType ty, int struct_id) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return 1;
-    if (ty == TY_SHORT || ty == TY_USHORT) return 2;
-    if (ty == TY_INT || ty == TY_UINT) return 4;
-    if (ty == TY_LONG || ty == TY_ULONG) return 8;
-    if (ty == TY_FLOAT) return 4;
-    if (ty == TY_DOUBLE) return 8;
-    if (ty == TY_INT_PTR || ty == TY_UINT_PTR || ty == TY_SHORT_PTR || ty == TY_USHORT_PTR ||
-        ty == TY_LONG_PTR || ty == TY_ULONG_PTR || ty == TY_CHAR_PTR || ty == TY_UCHAR_PTR ||
-        ty == TY_FLOAT_PTR || ty == TY_DOUBLE_PTR || ty == TY_STRUCT_PTR) return 8;
-    if (ty == TY_STRUCT) {
-        StructDef *d = get_struct_def(struct_id);
-        return d->size;
-    }
-    return 0;
-}
-
-static Sym* sym_find(const char *name) {
-    for (int i = sym_cnt - 1; i >= 0; i--) {
-        if (strcmp(symtab[i].name, name) == 0) return &symtab[i];
-    }
-    int gi = global_find_index(name);
-    if (gi >= 0) {
-        static Sym gsym;
-        strcpy(gsym.name, gsymtab[gi].name);
-        gsym.ty = gsymtab[gi].ty;
-        gsym.array_len = gsymtab[gi].array_len;
-        gsym.struct_id = gsymtab[gi].struct_id;
-        return &gsym;
-    }
-    error("找不到變數宣告");
     return NULL;
 }
 
-static int is_ptr(CType ty) {
-    return ty == TY_INT_PTR || ty == TY_UINT_PTR || ty == TY_SHORT_PTR || ty == TY_USHORT_PTR ||
-           ty == TY_LONG_PTR || ty == TY_ULONG_PTR || ty == TY_CHAR_PTR || ty == TY_UCHAR_PTR ||
-           ty == TY_FLOAT_PTR || ty == TY_DOUBLE_PTR || ty == TY_STRUCT_PTR;
+static void p_error(Parser *p, const char *msg) {
+    fprintf(stderr, "parse error (line %d): %s (got '%s')\n",
+            p->cur.line, msg, p->cur.text ? p->cur.text : "?");
+    exit(1);
 }
-static int is_float(CType ty) { return ty == TY_FLOAT || ty == TY_DOUBLE; }
-static int is_int(CType ty) {
-    return ty == TY_CHAR || ty == TY_UCHAR || ty == TY_SHORT || ty == TY_USHORT ||
-           ty == TY_INT || ty == TY_UINT || ty == TY_LONG || ty == TY_ULONG;
+
+/* ---------------------------------------------------------------- token helpers */
+
+static void advance(Parser *p) {
+    token_free(p->cur);
+    p->cur = lexer_next(p->lexer);
 }
-static int is_unsigned(CType ty) {
-    return ty == TY_UCHAR || ty == TY_USHORT || ty == TY_UINT || ty == TY_ULONG;
+
+static Token peek(Parser *p) {
+    return lexer_peek(p->lexer);
 }
-static int int_rank(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return 1;
-    if (ty == TY_SHORT || ty == TY_USHORT) return 2;
-    if (ty == TY_INT || ty == TY_UINT) return 3;
-    if (ty == TY_LONG || ty == TY_ULONG) return 4;
+
+static int check(Parser *p, TokenType t) { return p->cur.type == t; }
+
+static int match(Parser *p, TokenType t) {
+    if (check(p, t)) { advance(p); return 1; }
     return 0;
 }
-static CType int_promote(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR || ty == TY_SHORT || ty == TY_USHORT) return TY_INT;
-    return ty;
-}
-static CType int_type_from_rank(int rank, int is_uns) {
-    if (rank == 1) return is_uns ? TY_UCHAR : TY_CHAR;
-    if (rank == 2) return is_uns ? TY_USHORT : TY_SHORT;
-    if (rank == 3) return is_uns ? TY_UINT : TY_INT;
-    if (rank == 4) return is_uns ? TY_ULONG : TY_LONG;
-    return TY_INT;
-}
-static CType common_arith_type(CType a, CType b) {
-    if (is_float(a) || is_float(b)) {
-        if (a == TY_DOUBLE || b == TY_DOUBLE) return TY_DOUBLE;
-        return TY_FLOAT;
+
+static void expect(Parser *p, TokenType t) {
+    if (!check(p, t)) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "expected %s", token_type_name(t));
+        p_error(p, msg);
     }
-    a = int_promote(a);
-    b = int_promote(b);
-    int ra = int_rank(a);
-    int rb = int_rank(b);
-    int ua = is_unsigned(a);
-    int ub = is_unsigned(b);
-    if (ra == rb) {
-        return int_type_from_rank(ra, ua || ub);
-    }
-    if (ra > rb) {
-        if (ua) return int_type_from_rank(ra, 1);
-        if (ub) {
-            return int_type_from_rank(ra, 0);
-        }
-        return int_type_from_rank(ra, 0);
-    } else {
-        if (ub) return int_type_from_rank(rb, 1);
-        if (ua) {
-            return int_type_from_rank(rb, 0);
-        }
-        return int_type_from_rank(rb, 0);
-    }
-}
-static CType ptr_of(CType ty) {
-    if (ty == TY_CHAR) return TY_CHAR_PTR;
-    if (ty == TY_UCHAR) return TY_UCHAR_PTR;
-    if (ty == TY_SHORT) return TY_SHORT_PTR;
-    if (ty == TY_USHORT) return TY_USHORT_PTR;
-    if (ty == TY_INT) return TY_INT_PTR;
-    if (ty == TY_UINT) return TY_UINT_PTR;
-    if (ty == TY_LONG) return TY_LONG_PTR;
-    if (ty == TY_ULONG) return TY_ULONG_PTR;
-    if (ty == TY_FLOAT) return TY_FLOAT_PTR;
-    if (ty == TY_DOUBLE) return TY_DOUBLE_PTR;
-    if (ty == TY_STRUCT) return TY_STRUCT_PTR;
-    return ty;
-}
-static CType base_of(CType ty) {
-    if (ty == TY_CHAR_PTR) return TY_CHAR;
-    if (ty == TY_UCHAR_PTR) return TY_UCHAR;
-    if (ty == TY_SHORT_PTR) return TY_SHORT;
-    if (ty == TY_USHORT_PTR) return TY_USHORT;
-    if (ty == TY_INT_PTR) return TY_INT;
-    if (ty == TY_UINT_PTR) return TY_UINT;
-    if (ty == TY_LONG_PTR) return TY_LONG;
-    if (ty == TY_ULONG_PTR) return TY_ULONG;
-    if (ty == TY_FLOAT_PTR) return TY_FLOAT;
-    if (ty == TY_DOUBLE_PTR) return TY_DOUBLE;
-    if (ty == TY_STRUCT_PTR) return TY_STRUCT;
-    return TY_INT;
+    advance(p);
 }
 
-static CType parse_type_allow_void(int allow_void) {
-    CType base;
-    last_struct_id = -1;
-    while (cur_tok.type == TK_CONST) next_token();
-    if (allow_void && cur_tok.type == TK_VOID) { next_token(); base = TY_VOID; goto ptr_check; }
-    if (cur_tok.type == TK_STRUCT) {
-        next_token();
-        if (cur_tok.type != TK_IDENT) error("預期 struct 名稱");
-        int sid = struct_find(cur_tok.name);
-        if (sid < 0) error("未知的 struct");
-        next_token();
-        base = TY_STRUCT;
-        last_struct_id = sid;
-        goto ptr_check;
+static char *expect_ident(Parser *p) {
+    if (!check(p, TOK_IDENT)) p_error(p, "expected identifier");
+    char *s = strdup(p->cur.text);
+    advance(p);
+    return s;
+}
+
+/* ---------------------------------------------------------------- typedef lookup */
+
+static void register_typedef(Parser *p, const char *name, Type *t) {
+    if (p->n_typedefs >= MAX_TYPEDEFS) p_error(p, "too many typedefs");
+    TypedefEntry *te = calloc(1, sizeof(TypedefEntry));
+    te->name = strdup(name);
+    te->type = t;
+    p->typedefs[p->n_typedefs++] = te;
+}
+
+static Type *lookup_typedef(Parser *p, const char *name) {
+    for (int i = p->n_typedefs - 1; i >= 0; i--) {
+        TypedefEntry *te = p->typedefs[i];
+        if (te && strcmp(te->name, name) == 0)
+            return te->type;
     }
-    if (cur_tok.type == TK_IDENT) {
-        CType t;
-        int sid = -1;
-        if (typedef_find(cur_tok.name, &t, &sid)) {
-            next_token();
-            last_struct_id = sid;
-            base = t;
-            goto ptr_check;
+    return NULL;
+}
+
+static int is_gcc_extension(const char *s) {
+    return strcmp(s, "__attribute__") == 0 ||
+           strcmp(s, "__extension__") == 0 ||
+           strcmp(s, "__asm__")       == 0 ||
+           strcmp(s, "__asm")         == 0 ||
+           strcmp(s, "__inline__")    == 0 ||
+           strcmp(s, "__inline")      == 0 ||
+           strcmp(s, "__volatile__")  == 0 ||
+           strcmp(s, "__volatile")    == 0 ||
+           strcmp(s, "__restrict")    == 0 ||
+           strcmp(s, "__restrict__")  == 0 ||
+           strcmp(s, "__const")       == 0 ||
+           strcmp(s, "__const__")     == 0 ||
+           strcmp(s, "__signed__")    == 0 ||
+           strcmp(s, "__signed")      == 0 ||
+           strcmp(s, "__typeof__")    == 0 ||
+           strcmp(s, "__typeof")      == 0 ||
+           strcmp(s, "__cdecl")       == 0 ||
+           strcmp(s, "__declspec")    == 0 ||
+           strcmp(s, "__forceinline") == 0 ||
+           strcmp(s, "__nonnull")     == 0;
+}
+
+/* Skip __attribute__((...)), __asm__("..."), __typeof__(...) and bare
+   extension keywords */
+static void skip_gcc_extension(Parser *p) {
+    for (;;) {
+        if (!check(p, TOK_IDENT)) break;
+        if (!is_gcc_extension(p->cur.text)) break;
+        const char *kw = p->cur.text;
+        int has_parens = (strcmp(kw, "__attribute__") == 0 ||
+                          strcmp(kw, "__asm__")       == 0 ||
+                          strcmp(kw, "__asm")         == 0 ||
+                          strcmp(kw, "__typeof__")    == 0 ||
+                          strcmp(kw, "__typeof")      == 0 ||
+                          strcmp(kw, "__declspec")    == 0);
+        advance(p);
+        if (has_parens && check(p, TOK_LPAREN)) {
+            int depth = 1;
+            advance(p);
+            while (!check(p, TOK_EOF) && depth > 0) {
+                if      (check(p, TOK_LPAREN)) depth++;
+                else if (check(p, TOK_RPAREN)) depth--;
+                advance(p);
+            }
+        }
+    }
+}
+
+static int is_type_start(Parser *p) {
+    if (check(p, TOK_IDENT) && is_gcc_extension(p->cur.text)) return 0;
+    switch (p->cur.type) {
+    case TOK_INT: case TOK_CHAR: case TOK_FLOAT: case TOK_DOUBLE:
+    case TOK_VOID: case TOK_LONG: case TOK_SHORT: case TOK_UNSIGNED:
+    case TOK_SIGNED: case TOK_STRUCT: case TOK_UNION: case TOK_ENUM:
+    case TOK_CONST: case TOK_VOLATILE: case TOK_STATIC: case TOK_EXTERN:
+    case TOK_TYPEDEF:
+        return 1;
+    case TOK_IDENT:
+        return lookup_typedef(p, p->cur.text) != NULL;
+    default:
+        return 0;
+    }
+}
+
+/* ---------------------------------------------------------------- forward decls */
+static Node *parse_expr(Parser *p);
+static Node *parse_stmt(Parser *p);
+static Node *parse_initializer(Parser *p);
+static Type *parse_type_specifier(Parser *p, int *is_typedef, int *is_static, int *is_extern);
+static Type *parse_declarator(Parser *p, Type *base, char **out_name);
+
+/* ================================================================ Type parsing */
+
+static Type *parse_struct_union(Parser *p) {
+    int is_union = (p->cur.type == TOK_UNION);
+    advance(p);  /* eat struct/union */
+
+    char *tag = NULL;
+    if (check(p, TOK_IDENT)) {
+        tag = strdup(p->cur.text);
+        advance(p);
+    }
+
+    Type *t   = type_new(is_union ? TY_UNION : TY_STRUCT);
+    t->tag    = tag;
+
+    /* parse body */
+    if (check(p, TOK_LBRACE)) {
+        advance(p);
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            int dummy_td = 0, dummy_st = 0, dummy_ex = 0;
+            Type *mtype = parse_type_specifier(p, &dummy_td, &dummy_st, &dummy_ex);
+            if (!mtype) { advance(p); continue; }
+            char *mname = NULL;
+            mtype = parse_declarator(p, mtype, &mname);
+            if (mname) {
+                t->members = realloc(t->members, (t->n_members + 1) * sizeof(Type*));
+                t->params = realloc(t->params, (t->n_members + 1) * sizeof(Param));
+                t->members[t->n_members] = mtype;
+                t->params[t->n_members].name = mname;
+                t->params[t->n_members].type = mtype;
+                t->n_members++;
+            }
+            expect(p, TOK_SEMICOLON);
+        }
+        expect(p, TOK_RBRACE);
+    }
+    if (tag) register_struct(p, tag, t);
+    return t;
+}
+
+static Type *parse_enum_specifier(Parser *p) {
+    advance(p);  /* eat enum */
+    Type *t = type_new(TY_ENUM);
+    if (check(p, TOK_IDENT)) {
+        t->tag = strdup(p->cur.text);
+        advance(p);
+    }
+    if (check(p, TOK_LBRACE)) {
+        advance(p);
+        long long val = 0;
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            if (check(p, TOK_IDENT)) {
+                char *name = strdup(p->cur.text);
+                advance(p);
+                if (match(p, TOK_ASSIGN)) {
+                    /* parse constant expression — handle simple cases */
+                    if (check(p, TOK_INT_LIT)) {
+                        val = (long long)strtoll(p->cur.text, NULL, 0);
+                        advance(p);
+                    } else if (check(p, TOK_MINUS)) {
+                        advance(p);
+                        if (check(p, TOK_INT_LIT)) {
+                            val = -(long long)strtoll(p->cur.text, NULL, 0);
+                            advance(p);
+                        }
+                    } else if (check(p, TOK_IDENT)) {
+                        long long prev;
+                        if (lookup_enum_const(p, p->cur.text, &prev)) val = prev;
+                        advance(p);
+                        if (check(p, TOK_PLUS) || check(p, TOK_MINUS)) {
+                            int neg = (p->cur.type == TOK_MINUS);
+                            advance(p);
+                            if (check(p, TOK_INT_LIT)) {
+                                long long off = strtoll(p->cur.text, NULL, 0);
+                                val = neg ? val - off : val + off;
+                                advance(p);
+                            }
+                        }
+                    }
+                }
+                register_enum_const(p, name, val++);
+                free(name);
+            } else {
+                advance(p); /* skip unexpected tokens */
+            }
+            if (!match(p, TOK_COMMA)) break;
+        }
+        expect(p, TOK_RBRACE);
+    }
+    return t;
+}
+
+static Type *parse_type_specifier(Parser *p, int *is_typedef_out,
+                                   int *is_static_out, int *is_extern_out) {
+    int is_typedef = 0, is_static = 0, is_extern = 0;
+    int is_const = 0, is_volatile = 0;
+    int is_unsigned = 0, is_signed = 0;
+    int is_long = 0, is_longlong = 0, is_short = 0;
+
+    TypeKind base_kind = TY_INT;
+    int base_set = 0;
+    Type *direct = NULL;
+
+    for (;;) {
+        /* skip GCC extension keywords */
+        if (check(p, TOK_IDENT) && is_gcc_extension(p->cur.text)) {
+            skip_gcc_extension(p);
+            continue;
+        }
+        switch (p->cur.type) {
+        case TOK_TYPEDEF:   is_typedef  = 1; advance(p); break;
+        case TOK_STATIC:    is_static   = 1; advance(p); break;
+        case TOK_EXTERN:    is_extern   = 1; advance(p); break;
+        case TOK_CONST:     is_const    = 1; advance(p); break;
+        case TOK_VOLATILE:  is_volatile = 1; advance(p); break;
+        case TOK_UNSIGNED:  is_unsigned = 1; advance(p); break;
+        case TOK_SIGNED:    is_signed   = 1; advance(p); break;
+        case TOK_SHORT:     is_short    = 1; advance(p); break;
+        case TOK_LONG:
+            if (is_long) is_longlong = 1;
+            else         is_long     = 1;
+            advance(p); break;
+        case TOK_VOID:   base_kind = TY_VOID;   base_set = 1; advance(p); break;
+        case TOK_CHAR:   base_kind = TY_CHAR;   base_set = 1; advance(p); break;
+        case TOK_INT:    base_kind = TY_INT;    base_set = 1; advance(p); break;
+        case TOK_FLOAT:  base_kind = TY_FLOAT;  base_set = 1; advance(p); break;
+        case TOK_DOUBLE: base_kind = TY_DOUBLE; base_set = 1; advance(p); break;
+        case TOK_STRUCT:
+        case TOK_UNION:
+            direct   = parse_struct_union(p);
+            base_set = 1;
+            goto parse_type_done;
+        case TOK_ENUM:
+            direct   = parse_enum_specifier(p);
+            base_set = 1;
+            goto parse_type_done;
+        case TOK_IDENT: {
+            Type *td = lookup_typedef(p, p->cur.text);
+            if (td) {
+                /* clone reference */
+                direct = type_new(TY_TYPEDEF_REF);
+                direct->name = strdup(p->cur.text);
+                base_set = 1;
+                advance(p);
+                goto parse_type_done;
+            }
+            Type *st = lookup_struct(p, p->cur.text);
+            if (st) {
+                direct = st;
+                base_set = 1;
+                advance(p);
+                goto parse_type_done;
+            }
+            goto parse_type_done;
+        }
+        default:
+            goto parse_type_done;
+        }
+    }
+parse_type_done:;
+
+    if (is_typedef_out)  *is_typedef_out  = is_typedef;
+    if (is_static_out)   *is_static_out   = is_static;
+    if (is_extern_out)   *is_extern_out   = is_extern;
+
+    if (direct) {
+        direct->is_const    = is_const;
+        direct->is_volatile = is_volatile;
+        return direct;
+    }
+
+    if (!base_set && !is_long && !is_short && !is_unsigned && !is_signed)
+        return NULL;  /* no type found */
+
+    /* resolve combined specifiers */
+    if (base_kind == TY_CHAR) {
+        if (is_unsigned) base_kind = TY_UCHAR;
+        else if (is_signed) base_kind = TY_SCHAR;
+    } else if (is_longlong) {
+        base_kind = is_unsigned ? TY_ULONGLONG : TY_LONGLONG;
+    } else if (is_long) {
+        base_kind = is_unsigned ? TY_ULONG : TY_LONG;
+    } else if (is_short) {
+        base_kind = is_unsigned ? TY_USHORT : TY_SHORT;
+    } else if (base_kind == TY_INT || !base_set) {
+        if (is_unsigned) base_kind = TY_UINT;
+    }
+
+    Type *t = type_new(base_kind);
+    t->is_const    = is_const;
+    t->is_volatile = is_volatile;
+    return t;
+}
+
+/* Parse pointer prefixes and array/function suffixes around a name */
+static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
+    /* Collect pointer prefixes: they modify the return/element type */
+    int ptr_count = 0;
+    int ptr_const[16] = {0};
+    while (check(p, TOK_STAR) && ptr_count < 16) {
+        advance(p);
+        ptr_const[ptr_count] = 0;
+        while (check(p, TOK_CONST) || check(p, TOK_VOLATILE)) {
+            if (check(p, TOK_CONST)) ptr_const[ptr_count] = 1;
+            advance(p);
+        }
+        ptr_count++;
+    }
+
+    /* Apply pointer layers to base FIRST (so ptr wraps the base type,
+       becoming the return type of any following function declarator) */
+    for (int i = ptr_count - 1; i >= 0; i--) {
+        Type *pt = type_ptr(base);
+        pt->is_const = ptr_const[i];
+        base = pt;
+    }
+
+    /* direct declarator: name or grouped */
+    if (out_name) *out_name = NULL;
+    skip_gcc_extension(p);
+    if (check(p, TOK_IDENT) && !is_gcc_extension(p->cur.text)) {
+        if (out_name) *out_name = strdup(p->cur.text);
+        advance(p);
+    } else if (check(p, TOK_LPAREN)) {
+        /* Could be grouped declarator like (*fp)(args) */
+        /* Peek: if next is * or ident that looks like a declarator name,
+           treat as grouped; otherwise it's a function call suffix handled below */
+        advance(p);
+        /* save pos and try grouped declarator */
+        base = parse_declarator(p, base, out_name);
+        expect(p, TOK_RPAREN);
+    }
+    skip_gcc_extension(p);
+
+    /* suffixes: array [] and function () */
+    for (;;) {
+        if (check(p, TOK_IDENT) && is_gcc_extension(p->cur.text)) {
+            skip_gcc_extension(p);
+            continue;
+        }
+        if (check(p, TOK_LBRACKET)) {
+            advance(p);
+            long sz = -1;
+            if (!check(p, TOK_RBRACKET)) {
+                if (check(p, TOK_INT_LIT)) {
+                    sz = (long)atol(p->cur.text);
+                    advance(p);
+                } else {
+                    int depth = 0;
+                    while (!check(p, TOK_EOF)) {
+                        if (check(p, TOK_LBRACKET)) depth++;
+                        if (check(p, TOK_RBRACKET)) { if (depth == 0) break; depth--; }
+                        advance(p);
+                    }
+                }
+            }
+            expect(p, TOK_RBRACKET);
+            base = type_array(base, sz);
+        } else if (check(p, TOK_LPAREN)) {
+            advance(p);
+            Type *ft = type_new(TY_FUNC);
+            ft->ret = base;   /* base is already pointer-wrapped return type */
+            Param *params = NULL;
+            int n = 0;
+            int variadic = 0;
+            while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                if (check(p, TOK_ELLIPSIS)) {
+                    variadic = 1; advance(p); break;
+                }
+                int dummy_td = 0, dummy_st = 0, dummy_ex = 0;
+                Type *pt = parse_type_specifier(p, &dummy_td, &dummy_st, &dummy_ex);
+                if (!pt) break;
+                char *pname = NULL;
+                pt = parse_declarator(p, pt, &pname);
+                params = realloc(params, (n + 1) * sizeof(Param));
+                if (!params) { perror("realloc"); exit(1); }
+                params[n].name = pname;
+                params[n].type = pt;
+                n++;
+                if (!match(p, TOK_COMMA)) break;
+            }
+            expect(p, TOK_RPAREN);
+            ft->params      = params;
+            ft->param_count = n;
+            ft->variadic    = variadic;
+            base = ft;
+        } else {
+            break;
         }
     }
 
-    int is_uns = 0;
-    int is_short = 0;
-    int is_long = 0;
-    int has_type = 0;
-    CType builtin = TY_INT;
-    while (1) {
-        if (cur_tok.type == TK_CONST) { next_token(); continue; }
-        if (cur_tok.type == TK_UNSIGNED) { is_uns = 1; next_token(); continue; }
-        if (cur_tok.type == TK_SHORT) { is_short = 1; next_token(); continue; }
-        if (cur_tok.type == TK_LONG) { is_long = 1; next_token(); continue; }
-        if (cur_tok.type == TK_INT) { has_type = 1; builtin = TY_INT; next_token(); continue; }
-        if (cur_tok.type == TK_CHAR) { has_type = 1; builtin = TY_CHAR; next_token(); continue; }
-        if (cur_tok.type == TK_FLOAT) { has_type = 1; builtin = TY_FLOAT; next_token(); continue; }
-        if (cur_tok.type == TK_DOUBLE) { has_type = 1; builtin = TY_DOUBLE; next_token(); continue; }
-        break;
-    }
-    if (!has_type && (is_uns || is_short || is_long)) {
-        builtin = TY_INT;
-        has_type = 1;
-    }
-    if (!has_type) {
-        error("預期型別 int、char、float、double 或 void");
-        return TY_INT;
-    }
-    if (builtin == TY_FLOAT || builtin == TY_DOUBLE) {
-        if (is_uns || is_short || is_long) error("float/double 不可搭配 unsigned/short/long");
-        base = builtin;
-    } else if (builtin == TY_CHAR) {
-        if (is_short || is_long) error("char 不可搭配 short/long");
-        base = is_uns ? TY_UCHAR : TY_CHAR;
-    } else {
-        if (is_short && is_long) error("short/long 不可同時使用");
-        if (is_short) base = is_uns ? TY_USHORT : TY_SHORT;
-        else if (is_long) base = is_uns ? TY_ULONG : TY_LONG;
-        else base = is_uns ? TY_UINT : TY_INT;
-    }
-
-ptr_check:
-    if (cur_tok.type == TK_MUL) {
-        if (base == TY_VOID) error("不支援 void*");
-        next_token();
-        return ptr_of(base);
-    }
     return base;
 }
 
-static CType parse_type(void) {
-    return parse_type_allow_void(0);
-}
+/* ================================================================ Expressions */
 
-static ASTNode* make_var_node(const char *name) {
-    Sym *s = sym_find(name);
-    ASTNode *n = new_node(AST_VAR);
-    strcpy(n->name, name);
-    n->ty = s->ty;
-    n->array_len = s->array_len;
-    n->struct_id = s->struct_id;
-    return n;
-}
+static Node *parse_primary(Parser *p);
+static Node *parse_postfix(Parser *p);
+static Node *parse_unary(Parser *p);
+static Node *parse_cast(Parser *p);
+static Node *parse_mul(Parser *p);
+static Node *parse_add(Parser *p);
+static Node *parse_shift(Parser *p);
+static Node *parse_relational(Parser *p);
+static Node *parse_equality(Parser *p);
+static Node *parse_bitand(Parser *p);
+static Node *parse_bitxor(Parser *p);
+static Node *parse_bitor(Parser *p);
+static Node *parse_logand(Parser *p);
+static Node *parse_logor(Parser *p);
+static Node *parse_ternary(Parser *p);
+static Node *parse_assign(Parser *p);
 
-static ASTNode* parse_expr();
-static ASTNode* parse_stmt();
-static ASTNode* parse_block();
-static ASTNode* parse_if_stmt();
-static ASTNode* parse_while_stmt();
-static ASTNode* parse_for_stmt();
-static ASTNode* parse_break_stmt();
-static ASTNode* parse_continue_stmt();
-static ASTNode* parse_unary();
-static ASTNode* parse_lvalue();
-static ASTNode* parse_postfix();
-static ASTNode* parse_switch_stmt();
-static ASTNode* parse_do_stmt();
-static ASTNode* parse_struct_decl_or_def();
-static ASTNode* parse_typedef_stmt();
-static ASTNode* parse_decl_stmt(int expect_semi);
-
-static int is_struct_def_ahead(void) {
-    char *saved_p = p;
-    Token saved_tok = cur_tok;
-    int saved_line = cur_line;
-    int saved_col = cur_col;
-
-    next_token();
-    if (cur_tok.type != TK_IDENT) {
-        p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-        return 0;
+static Node *parse_primary(Parser *p) {
+    int line = p->cur.line;
+    if (check(p, TOK_INT_LIT)) {
+        Node *n = node_new(ND_INT_LIT, line);
+        n->ival = (long long)strtoll(p->cur.text, NULL, 0);
+        advance(p);
+        return n;
     }
-    next_token();
-    int is_def = (cur_tok.type == TK_LBRACE);
-
-    p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-    return is_def;
-}
-
-static int is_type_start(void);
-
-static int is_func_def_ahead(void) {
-    char *saved_p = p;
-    Token saved_tok = cur_tok;
-    int saved_line = cur_line;
-    int saved_col = cur_col;
-    int saved_struct = last_struct_id;
-
-    if (!is_type_start()) return 0;
-    parse_type_allow_void(1);
-    if (cur_tok.type != TK_IDENT) {
-        p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col; last_struct_id = saved_struct;
-        return 0;
+    if (check(p, TOK_FLOAT_LIT)) {
+        Node *n = node_new(ND_FLOAT_LIT, line);
+        n->fval = atof(p->cur.text);
+        advance(p);
+        return n;
     }
-    next_token();
-    int is_func = (cur_tok.type == TK_LPAREN);
-
-    p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col; last_struct_id = saved_struct;
-    return is_func;
-}
-
-static int is_typedef_name(void) {
-    if (cur_tok.type != TK_IDENT) return 0;
-    CType t; int sid;
-    return typedef_find(cur_tok.name, &t, &sid);
-}
-
-static int is_type_start(void) {
-    if (cur_tok.type == TK_INT || cur_tok.type == TK_CHAR || cur_tok.type == TK_FLOAT ||
-        cur_tok.type == TK_DOUBLE || cur_tok.type == TK_UNSIGNED || cur_tok.type == TK_SHORT ||
-        cur_tok.type == TK_LONG || cur_tok.type == TK_CONST || cur_tok.type == TK_STRUCT) return 1;
-    return is_typedef_name();
-}
-
-static int is_lvalue_node(ASTNode *n) {
-    if (!n) return 0;
-    return n->type == AST_VAR || n->type == AST_INDEX || n->type == AST_DEREF || n->type == AST_MEMBER;
-}
-
-static ASTNode* parse_primary() {
-    if (cur_tok.type == TK_NUM) {
-        ASTNode *n = new_node(AST_NUM);
-        n->val = cur_tok.val;
-        n->ty = TY_INT;
-        next_token();
-        return n;
-    } else if (cur_tok.type == TK_FLOAT_LIT) {
-        ASTNode *n = new_node(AST_FLOAT);
-        n->fval = cur_tok.fval;
-        n->ty = (cur_tok.val == 1) ? TY_FLOAT : TY_DOUBLE;
-        next_token();
-        return n;
-    } else if (cur_tok.type == TK_CHAR_LIT) {
-        ASTNode *n = new_node(AST_NUM);
-        n->val = cur_tok.val;
-        n->ty = TY_CHAR;
-        next_token();
-        return n;
-    } else if (cur_tok.type == TK_STR) {
-        ASTNode *n = new_node(AST_STR);
-        strcpy(n->str_val, cur_tok.str_val);
-        n->ty = TY_CHAR_PTR;
-        next_token();
-        return n;
-    } else if (cur_tok.type == TK_IDENT) {
-        char name[64];
-        strcpy(name, cur_tok.name);
-        next_token();
-
-        if (cur_tok.type == TK_LPAREN) {
-            next_token();
-            ASTNode *n = new_node(AST_CALL);
-            strcpy(n->name, name);
-            FuncSym *fs = func_find(name);
-            n->ty = fs ? fs->ret : TY_INT;
-            n->struct_id = fs ? fs->ret_struct_id : -1;
-            ASTNode *head = NULL, *tail = NULL;
-            int arg_count = 0;
-            if (cur_tok.type != TK_RPAREN) {
-                head = tail = parse_expr();
-                arg_count++;
-                while (cur_tok.type == TK_COMMA) {
-                    next_token();
-                    tail->next = parse_expr();
-                    tail = tail->next;
-                    arg_count++;
-                }
+    if (check(p, TOK_CHAR_LIT)) {
+        Node *n = node_new(ND_CHAR_LIT, line);
+        const char *s = p->cur.text;
+        if (s[0] == '\'' && s[1] == '\\') {
+            switch (s[2]) {
+            case 'n': n->ival = '\n'; break;
+            case 't': n->ival = '\t'; break;
+            case 'r': n->ival = '\r'; break;
+            case '0': n->ival = '\0'; break;
+            default:  n->ival = s[2]; break;
             }
-            expect(TK_RPAREN, "預期 ')'");
-            n->left = head;
-            if (fs && strcmp(name, "printf") != 0) {
-                if (arg_count != fs->param_cnt) error("函式參數數量不符");
-                ASTNode *a = head;
-                for (int i = 0; i < fs->param_cnt; i++) {
-                    CType pt = fs->params[i];
-                    int psid = fs->param_struct_id[i];
-                    if (is_ptr(pt)) {
-                        int ok = 0;
-                        if (a && a->type == AST_NUM && a->val == 0) ok = 1;
-                        if (a && is_ptr(a->ty)) ok = 1;
-                        if (!ok) error("指標參數需要指標或 0");
-                        if (pt == TY_STRUCT_PTR && a && is_ptr(a->ty) && a->ty == TY_STRUCT_PTR) {
-                            if (a->struct_id != psid) error("struct 指標參數型別不相容");
-                        } else if (a && is_ptr(a->ty) && pt != a->ty) {
-                            error("指標參數型別不相容");
-                        }
-                    } else {
-                        if (a && is_ptr(a->ty)) error("非指標參數不可傳入指標");
-                    }
-                    if (a) a = a->next;
-                }
-            }
-            return n;
         } else {
-            ASTNode *n = make_var_node(name);
+            n->ival = (unsigned char)s[1];
+        }
+        advance(p);
+        return n;
+    }
+    if (check(p, TOK_STRING_LIT)) {
+        Node *n  = node_new(ND_STRING_LIT, line);
+        /* start with first string (strip closing quote) */
+        size_t len = strlen(p->cur.text);
+        char *combined = malloc(len + 1);
+        memcpy(combined, p->cur.text, len - 1); /* drop closing " */
+        combined[len - 1] = '\0';
+        advance(p);
+        /* concatenate any adjacent string literals */
+        while (check(p, TOK_STRING_LIT)) {
+            const char *next = p->cur.text + 1; /* skip opening " */
+            size_t nlen = strlen(next);          /* includes closing " */
+            size_t cur_len = strlen(combined);
+            combined = realloc(combined, cur_len + nlen + 1);
+            memcpy(combined + cur_len, next, nlen);
+            combined[cur_len + nlen] = '\0';
+            advance(p);
+        }
+        /* re-add closing quote */
+        size_t fl = strlen(combined);
+        combined = realloc(combined, fl + 2);
+        combined[fl]   = '"';
+        combined[fl+1] = '\0';
+        n->sval = combined;
+        return n;
+    }
+    if (check(p, TOK_IDENT)) {
+        /* check if it's a known enum constant */
+        long long eval;
+        if (lookup_enum_const(p, p->cur.text, &eval)) {
+            Node *n = node_new(ND_INT_LIT, line);
+            n->ival = eval;
+            advance(p);
             return n;
         }
-    } else if (cur_tok.type == TK_LPAREN) {
-        next_token();
-        ASTNode *n = parse_expr();
-        expect(TK_RPAREN, "預期 ')'");
+        Node *n  = node_new(ND_IDENT, line);
+        n->sval  = strdup(p->cur.text);
+        advance(p);
         return n;
     }
-    error("預期 表達式 (Expression)");
+    if (match(p, TOK_LPAREN)) {
+        /* check for cast: (type) expr */
+        if (is_type_start(p)) {
+            int dummy_td = 0, dummy_st = 0, dummy_ex = 0;
+            Type *ct = parse_type_specifier(p, &dummy_td, &dummy_st, &dummy_ex);
+            if (ct) {
+                char *dummy_name = NULL;
+                ct = parse_declarator(p, ct, &dummy_name);
+                free(dummy_name);
+                if (match(p, TOK_RPAREN)) {
+                    Node *cast = node_new(ND_CAST, line);
+                    cast->cast_type = ct;
+                    cast->cast_expr = parse_cast(p);
+                    return cast;
+                }
+            }
+        }
+        Node *inner = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        return inner;
+    }
+    if (check(p, TOK_SIZEOF)) {
+        advance(p);
+        if (match(p, TOK_LPAREN)) {
+            if (is_type_start(p)) {
+                int dummy_td = 0, dummy_st = 0, dummy_ex = 0;
+                Type *st = parse_type_specifier(p, &dummy_td, &dummy_st, &dummy_ex);
+                char *dummy_name = NULL;
+                st = parse_declarator(p, st, &dummy_name);
+                free(dummy_name);
+                expect(p, TOK_RPAREN);
+                Node *n    = node_new(ND_SIZEOF_TYPE, line);
+                n->cast_type = st;
+                return n;
+            }
+            Node *e = parse_expr(p);
+            expect(p, TOK_RPAREN);
+            Node *n    = node_new(ND_SIZEOF_EXPR, line);
+            node_add_child(n, e);
+            return n;
+        }
+        Node *e = parse_unary(p);
+        Node *n = node_new(ND_SIZEOF_EXPR, line);
+        node_add_child(n, e);
+        return n;
+    }
+    p_error(p, "expected primary expression");
     return NULL;
 }
 
-static ASTNode* parse_postfix() {
-    ASTNode *n = parse_primary();
-    while (1) {
-        if (cur_tok.type == '[') {
-            next_token();
-            ASTNode *idx = parse_expr();
-            expect(']', "預期 ']'");
-            ASTNode *nidx = new_node(AST_INDEX);
-            nidx->left = n;
-            nidx->right = idx;
-            if (!is_ptr(n->ty)) error("只有指標或陣列可以使用 []");
-            nidx->ty = base_of(n->ty);
-            nidx->struct_id = n->struct_id;
-            n = nidx;
-            continue;
-        }
-        if (cur_tok.type == '.' || cur_tok.type == TK_ARROW) {
-            int is_arrow = (cur_tok.type == TK_ARROW);
-            next_token();
-            if (cur_tok.type != TK_IDENT) error("預期欄位名稱");
-            ASTNode *m = new_node(AST_MEMBER);
-            m->left = n;
-            strcpy(m->name, cur_tok.name);
-            m->op = is_arrow;
-            int sid = n->struct_id;
-            if (is_arrow) {
-                if (n->ty != TY_STRUCT_PTR) error("-> 只能用在 struct 指標");
-            } else {
-                if (n->ty != TY_STRUCT) error(". 只能用在 struct");
+static Node *parse_postfix(Parser *p) {
+    Node *n = parse_primary(p);
+    for (;;) {
+        int line = p->cur.line;
+        if (match(p, TOK_LPAREN)) {
+            /* function call */
+            Node *call = node_new(ND_CALL, line);
+            node_add_child(call, n);
+            while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                node_add_child(call, parse_assign(p));
+                if (!match(p, TOK_COMMA)) break;
             }
-            StructDef *def = get_struct_def(sid);
-            int found = 0;
-            for (int i = 0; i < def->field_cnt; i++) {
-                if (strcmp(def->fields[i].name, m->name) == 0) {
-                    m->ty = def->fields[i].ty;
-                    m->val = def->fields[i].offset;
-                    m->struct_id = def->fields[i].struct_id;
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) error("找不到 struct 欄位");
-            next_token();
+            expect(p, TOK_RPAREN);
+            n = call;
+        } else if (match(p, TOK_LBRACKET)) {
+            Node *idx = node_new(ND_INDEX, line);
+            node_add_child(idx, n);
+            node_add_child(idx, parse_expr(p));
+            expect(p, TOK_RBRACKET);
+            n = idx;
+        } else if (match(p, TOK_DOT)) {
+            Node *m = node_new(ND_MEMBER, line);
+            m->sval = expect_ident(p);
+            node_add_child(m, n);
             n = m;
-            continue;
-        }
-        if (cur_tok.type == TK_PLUSPLUS || cur_tok.type == TK_MINUSMINUS) {
-            if (!is_lvalue_node(n)) error("++/-- 只能用在左值上");
-            if (is_ptr(n->ty) || n->ty == TY_STRUCT) error("++/-- 不支援指標或 struct");
-            ASTNode *inc = new_node(AST_INCDEC);
-            inc->op = cur_tok.type;
-            inc->is_prefix = 0;
-            inc->left = n;
-            inc->ty = n->ty;
-            next_token();
-            n = inc;
+        } else if (match(p, TOK_ARROW)) {
+            Node *m = node_new(ND_ARROW, line);
+            m->sval = expect_ident(p);
+            node_add_child(m, n);
+            n = m;
+        } else if (check(p, TOK_INC)) {
+            advance(p);
+            Node *u = node_new(ND_POST_INC, line);
+            node_add_child(u, n);
+            n = u;
+        } else if (check(p, TOK_DEC)) {
+            advance(p);
+            Node *u = node_new(ND_POST_DEC, line);
+            node_add_child(u, n);
+            n = u;
+        } else {
             break;
         }
-        break;
     }
     return n;
 }
 
-static ASTNode* parse_mul() {
-    ASTNode *n = parse_unary();
-    while (cur_tok.type == TK_MUL || cur_tok.type == TK_DIV || cur_tok.type == TK_MOD) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_unary(); n = p;
-        if (p->op == TK_MOD) {
-            if (!is_int(p->left->ty) || !is_int(p->right->ty)) error("% 只能用在整數");
-            p->ty = common_arith_type(p->left->ty, p->right->ty);
-        } else {
-            if ((is_ptr(p->left->ty) || is_ptr(p->right->ty)) ||
-                (p->left->ty == TY_STRUCT || p->right->ty == TY_STRUCT)) {
-                error("不支援的乘除型別");
-            }
-            p->ty = common_arith_type(p->left->ty, p->right->ty);
-        }
-    }
-    return n;
-}
-
-static ASTNode* parse_add() {
-    ASTNode *n = parse_mul();
-    while (cur_tok.type == TK_PLUS || cur_tok.type == TK_MINUS) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_mul(); n = p;
-        if (is_ptr(p->left->ty) && is_ptr(p->right->ty)) {
-            if (p->op == TK_MINUS) {
-                p->ty = TY_INT;
-                p->struct_id = p->left->struct_id;
-            } else {
-                error("不支援指標相加");
-            }
-        } else if ((is_ptr(p->left->ty) && (p->op == TK_PLUS || p->op == TK_MINUS)) ||
-                   (is_ptr(p->right->ty) && p->op == TK_PLUS)) {
-            if (is_ptr(p->left->ty) && !is_int(p->right->ty)) error("指標只能加減整數");
-            if (is_ptr(p->right->ty) && !is_int(p->left->ty)) error("指標只能加整數");
-            if (is_ptr(p->left->ty)) {
-                p->ty = p->left->ty;
-                p->struct_id = p->left->struct_id;
-            } else {
-                p->ty = p->right->ty;
-                p->struct_id = p->right->struct_id;
-            }
-        } else if (!is_ptr(p->left->ty) && is_ptr(p->right->ty) && p->op == TK_MINUS) {
-            error("不支援 int - 指標");
-        } else {
-            if ((p->left->ty == TY_STRUCT || p->right->ty == TY_STRUCT) ||
-                is_ptr(p->left->ty) || is_ptr(p->right->ty)) {
-                error("不支援的加減型別");
-            }
-            p->ty = common_arith_type(p->left->ty, p->right->ty);
-        }
-    }
-    return n;
-}
-
-static ASTNode* parse_rel() {
-    ASTNode *n = parse_add();
-    while (cur_tok.type == TK_LT || cur_tok.type == TK_GT ||
-           cur_tok.type == TK_LE || cur_tok.type == TK_GE) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_add(); n = p;
-        if (is_ptr(p->left->ty) || is_ptr(p->right->ty)) {
-            if (!is_ptr(p->left->ty) || !is_ptr(p->right->ty)) error("指標只能與指標比較");
-        } else if (!is_int(p->left->ty) && !is_float(p->left->ty)) {
-            error("不支援的比較型別");
-        }
-        p->ty = TY_INT;
-    }
-    return n;
-}
-
-static ASTNode* parse_eq() {
-    ASTNode *n = parse_rel();
-    while (cur_tok.type == TK_EQ || cur_tok.type == TK_NE) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_rel(); n = p;
-        if (is_ptr(p->left->ty) || is_ptr(p->right->ty)) {
-            if (!is_ptr(p->left->ty) && !(p->left->type == AST_NUM && p->left->val == 0)) {
-                if (!is_ptr(p->right->ty) && !(p->right->type == AST_NUM && p->right->val == 0)) {
-                    error("指標只能與 0 或指標比較");
-                }
-            }
-        }
-        p->ty = TY_INT;
-    }
-    return n;
-}
-
-static ASTNode* parse_and() {
-    ASTNode *n = parse_eq();
-    while (cur_tok.type == TK_ANDAND) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_eq(); n = p;
-        p->ty = TY_INT;
-    }
-    return n;
-}
-
-static ASTNode* parse_or() {
-    ASTNode *n = parse_and();
-    while (cur_tok.type == TK_OROR) {
-        ASTNode *p = new_node(AST_BINOP); p->op = cur_tok.type; p->left = n;
-        next_token(); p->right = parse_and(); n = p;
-        p->ty = TY_INT;
-    }
-    return n;
-}
-
-static ASTNode* parse_expr() { return parse_or(); }
-
-static ASTNode* parse_unary() {
-    if (cur_tok.type == TK_SIZEOF) {
-        next_token();
-        ASTNode *n = new_node(AST_SIZEOF);
-        n->ty = TY_INT;
-        if (cur_tok.type == TK_LPAREN) {
-            char *saved_p = p; Token saved_tok = cur_tok;
-            int saved_line = cur_line; int saved_col = cur_col;
-            next_token();
-            int is_type = 0;
-            if (cur_tok.type == TK_INT || cur_tok.type == TK_CHAR || cur_tok.type == TK_STRUCT) {
-                is_type = 1;
-            } else if (cur_tok.type == TK_IDENT) {
-                CType t; int sid;
-                if (typedef_find(cur_tok.name, &t, &sid)) is_type = 1;
-            }
-            if (is_type) {
-                p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-                expect(TK_LPAREN, "預期 '('");
-                CType ty = parse_type_allow_void(0);
-                expect(TK_RPAREN, "預期 ')'");
-                n->ty = TY_INT;
-                n->val = type_size(ty, last_struct_id);
-                n->left = NULL;
-                n->op = 0;
-                return n;
-            }
-            p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-        }
-        n->left = parse_unary();
-        if (n->left && n->left->type == AST_VAR && n->left->array_len > 0) {
-            int esz = type_size(base_of(n->left->ty), n->left->struct_id);
-            n->val = n->left->array_len * esz;
-        } else {
-            n->val = type_size(n->left->ty, n->left->struct_id);
-        }
+static Node *parse_unary(Parser *p) {
+    int line = p->cur.line;
+    if (check(p, TOK_INC)) { advance(p); Node *n = node_new(ND_PRE_INC, line); node_add_child(n, parse_unary(p)); return n; }
+    if (check(p, TOK_DEC)) { advance(p); Node *n = node_new(ND_PRE_DEC, line); node_add_child(n, parse_unary(p)); return n; }
+    if (check(p, TOK_AMP)) {
+        advance(p);
+        Node *n = node_new(ND_ADDR, line);
+        node_add_child(n, parse_cast(p));
         return n;
     }
-    if (cur_tok.type == TK_LPAREN) {
-        char *saved_p = p; Token saved_tok = cur_tok; int saved_line = cur_line; int saved_col = cur_col;
-        next_token();
-        if (is_type_start()) {
-            p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-            expect(TK_LPAREN, "預期 '('");
-            CType ty = parse_type_allow_void(0);
-            if (ty == TY_STRUCT) error("不支援 struct 轉型");
-            expect(TK_RPAREN, "預期 ')'");
-            ASTNode *n = new_node(AST_CAST);
-            n->ty = ty;
-            n->struct_id = last_struct_id;
-            n->left = parse_unary();
-            return n;
-        }
-        p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
+    if (check(p, TOK_STAR)) {
+        advance(p);
+        Node *n = node_new(ND_DEREF, line);
+        node_add_child(n, parse_cast(p));
+        return n;
     }
-    if (cur_tok.type == TK_MINUS || cur_tok.type == TK_NOT ||
-        cur_tok.type == TK_PLUSPLUS || cur_tok.type == TK_MINUSMINUS ||
-        cur_tok.type == TK_PLUS ||
-        cur_tok.type == TK_MUL || cur_tok.type == '&') {
-        TokenType op = cur_tok.type;
-        next_token();
-        ASTNode *operand = parse_unary();
-        if (op == '&') {
-            ASTNode *n = new_node(AST_ADDR);
-            n->left = operand;
-            n->ty = ptr_of(operand->ty);
-            n->struct_id = operand->struct_id;
+    if (check(p, TOK_MINUS) || check(p, TOK_PLUS) ||
+        check(p, TOK_BANG)  || check(p, TOK_TILDE)) {
+        int op = p->cur.type;
+        advance(p);
+        Node *n = node_new(ND_UNOP, line);
+        n->op   = op;
+        node_add_child(n, parse_cast(p));
+        return n;
+    }
+    return parse_postfix(p);
+}
+
+static Node *parse_cast(Parser *p) {
+    return parse_unary(p);
+}
+
+#define BINOP_LEVEL(name, next, ...)                                  \
+static Node *name(Parser *p) {                                        \
+    Node *left = next(p);                                             \
+    TokenType ops[] = { __VA_ARGS__, TOK_EOF };                       \
+    for (;;) {                                                        \
+        int found = 0;                                                \
+        for (int i = 0; ops[i] != TOK_EOF; i++) {                    \
+            if (p->cur.type == ops[i]) {                              \
+                int line = p->cur.line;                               \
+                int op   = p->cur.type;                               \
+                advance(p);                                           \
+                Node *right = next(p);                                \
+                Node *n     = node_new(ND_BINOP, line);               \
+                n->op       = op;                                     \
+                node_add_child(n, left);                              \
+                node_add_child(n, right);                             \
+                left  = n;                                            \
+                found = 1;                                            \
+                break;                                                \
+            }                                                         \
+        }                                                             \
+        if (!found) break;                                            \
+    }                                                                 \
+    return left;                                                      \
+}
+
+BINOP_LEVEL(parse_mul,        parse_cast,        TOK_STAR, TOK_SLASH, TOK_PERCENT)
+BINOP_LEVEL(parse_add,        parse_mul,         TOK_PLUS, TOK_MINUS)
+BINOP_LEVEL(parse_shift,      parse_add,         TOK_LSHIFT, TOK_RSHIFT)
+BINOP_LEVEL(parse_relational, parse_shift,       TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ)
+BINOP_LEVEL(parse_equality,   parse_relational,  TOK_EQ, TOK_NEQ)
+BINOP_LEVEL(parse_bitand,     parse_equality,    TOK_AMP)
+BINOP_LEVEL(parse_bitxor,     parse_bitand,      TOK_CARET)
+BINOP_LEVEL(parse_bitor,      parse_bitxor,      TOK_PIPE)
+BINOP_LEVEL(parse_logand,     parse_bitor,       TOK_AND)
+BINOP_LEVEL(parse_logor,      parse_logand,      TOK_OR)
+
+static Node *parse_ternary(Parser *p) {
+    Node *cond = parse_logor(p);
+    if (!check(p, TOK_QUESTION)) return cond;
+    int line = p->cur.line;
+    advance(p);
+    Node *then_e = parse_expr(p);
+    expect(p, TOK_COLON);
+    Node *else_e = parse_ternary(p);
+    Node *n      = node_new(ND_TERNARY, line);
+    n->cond = cond;
+    node_add_child(n, then_e);
+    node_add_child(n, else_e);
+    return n;
+}
+
+static Node *parse_assign(Parser *p) {
+    Node *left = parse_ternary(p);
+    int line   = p->cur.line;
+
+    /* Check each assignment operator explicitly — avoids static array init issues */
+    {
+        TokenType t = p->cur.type;
+        if (t == TOK_ASSIGN || t == TOK_PLUS_ASSIGN || t == TOK_MINUS_ASSIGN ||
+            t == TOK_STAR_ASSIGN || t == TOK_SLASH_ASSIGN || t == TOK_PERCENT_ASSIGN ||
+            t == TOK_AMP_ASSIGN  || t == TOK_PIPE_ASSIGN  || t == TOK_CARET_ASSIGN  ||
+            t == TOK_LSHIFT_ASSIGN || t == TOK_RSHIFT_ASSIGN) {
+            int op = t;
+            advance(p);
+            Node *right = parse_assign(p);
+            NodeKind nk = (op == TOK_ASSIGN) ? ND_ASSIGN : ND_COMPOUND_ASSIGN;
+            Node *n = node_new(nk, line);
+            n->op   = op;
+            node_add_child(n, left);
+            node_add_child(n, right);
             return n;
         }
-        if (op == TK_MUL) {
-            if (!is_ptr(operand->ty)) error("解參考只能用在指標上");
-            ASTNode *n = new_node(AST_DEREF);
-            n->left = operand;
-            n->ty = base_of(operand->ty);
-            n->struct_id = operand->struct_id;
-            return n;
-        }
-        if (op == TK_PLUSPLUS || op == TK_MINUSMINUS) {
-            if (!is_lvalue_node(operand)) error("++/-- 只能用在左值上");
-            if (is_ptr(operand->ty) || operand->ty == TY_STRUCT) error("++/-- 不支援指標或 struct");
-            ASTNode *inc = new_node(AST_INCDEC);
-            inc->op = op;
-            inc->is_prefix = 1;
-            inc->left = operand;
-            inc->ty = operand->ty;
-            return inc;
-        }
-        ASTNode *n = new_node(AST_UNARY);
-        n->op = op;
-        n->left = operand;
-        if (op == TK_MINUS || op == TK_PLUS) {
-            if (!is_int(operand->ty) && !is_float(operand->ty)) error("不支援的一元 -");
-            n->ty = operand->ty;
+    }
+    return left;
+}
+
+static Node *parse_expr(Parser *p) {
+    Node *n = parse_assign(p);
+    if (check(p, TOK_COMMA)) {
+        int line = p->cur.line;
+        Node *comma = node_new(ND_COMMA, line);
+        node_add_child(comma, n);
+        while (match(p, TOK_COMMA))
+            node_add_child(comma, parse_assign(p));
+        return comma;
+    }
+    return n;
+}
+
+/* ================================================================ Statements */
+
+static Node *parse_block(Parser *p);
+
+static Node *parse_local_decl(Parser *p) {
+    int line = p->cur.line;
+    int is_typedef = 0, is_static = 0, is_extern = 0;
+    Type *base = parse_type_specifier(p, &is_typedef, &is_static, &is_extern);
+    if (!base) return NULL;
+
+    /* multiple declarators */
+    Node *block_wrap = node_new(ND_BLOCK, line);
+    do {
+        char *name = NULL;
+        Type *t    = parse_declarator(p, base, &name);
+        if (is_typedef && name) {
+            register_typedef(p, name, t);
+            Node *td = node_new(ND_TYPEDEF, line);
+            td->typedef_name = name;
+            td->typedef_type = t;
+            node_add_child(block_wrap, td);
         } else {
-            n->ty = TY_INT;
+            Node *vd = node_new(ND_VAR_DECL, line);
+            vd->var_name  = name;
+            vd->var_type  = t;
+            vd->is_static = is_static;
+            vd->is_extern = is_extern;
+            /* optional initializer */
+            if (match(p, TOK_ASSIGN)) {
+                node_add_child(vd, parse_initializer(p));
+            }
+            node_add_child(block_wrap, vd);
         }
+    } while (match(p, TOK_COMMA));
+    expect(p, TOK_SEMICOLON);
+
+    /* unwrap if only one decl */
+    if (block_wrap->n_children == 1) {
+        Node *child = block_wrap->children[0];
+        block_wrap->n_children = 0;
+        free(block_wrap->children);
+        free(block_wrap);
+        return child;
+    }
+    return block_wrap;
+}
+
+/* Parse an initializer: either an expression or a { ... } list.
+   Returns a node representing the initializer value. */
+static Node *parse_initializer(Parser *p) {
+    int line = p->cur.line;
+    if (!check(p, TOK_LBRACE))
+        return parse_assign(p);
+
+    /* brace-enclosed initializer list: skip entirely, emit 0 placeholder */
+    advance(p); /* eat { */
+    int depth = 1;
+    while (!check(p, TOK_EOF) && depth > 0) {
+        if      (check(p, TOK_LBRACE)) depth++;
+        else if (check(p, TOK_RBRACE)) { depth--; if (depth == 0) break; }
+        advance(p);
+    }
+    expect(p, TOK_RBRACE);
+    /* represent as int literal 0 — codegen emits zeroinitializer */
+    Node *n = node_new(ND_INT_LIT, line);
+    n->ival = 0;
+    n->sval = strdup("{init}");
+    return n;
+}
+
+
+static Node *parse_stmt(Parser *p) {
+    int line = p->cur.line;
+
+    if (check(p, TOK_LBRACE))
+        return parse_block(p);
+
+    if (check(p, TOK_IF)) {
+        advance(p);
+        Node *n = node_new(ND_IF, line);
+        expect(p, TOK_LPAREN);
+        n->cond = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        n->then_branch = parse_stmt(p);
+        if (match(p, TOK_ELSE))
+            n->else_branch = parse_stmt(p);
         return n;
     }
-    return parse_postfix();
-}
 
-static ASTNode* parse_lvalue() {
-    ASTNode *n = parse_unary();
-    if (n->type == AST_VAR || n->type == AST_INDEX || n->type == AST_DEREF || n->type == AST_MEMBER) {
+    if (check(p, TOK_WHILE)) {
+        advance(p);
+        Node *n = node_new(ND_WHILE, line);
+        expect(p, TOK_LPAREN);
+        n->loop_cond = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        n->loop_body = parse_stmt(p);
         return n;
     }
-    error("預期左值");
-    return NULL;
-}
 
-static ASTNode* parse_block() {
-    expect(TK_LBRACE, "預期 '{'");
-    int scope_mark = sym_cnt;
-    ASTNode *head = NULL, *tail = NULL;
-    while (cur_tok.type != TK_RBRACE && cur_tok.type != TK_EOF) {
-        ASTNode *stmt = parse_stmt();
-        if (!head) head = tail = stmt; else { tail->next = stmt; tail = stmt; }
+    if (check(p, TOK_DO)) {
+        advance(p);
+        Node *n = node_new(ND_DO_WHILE, line);
+        n->loop_body = parse_stmt(p);
+        expect(p, TOK_WHILE);
+        expect(p, TOK_LPAREN);
+        n->loop_cond = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        expect(p, TOK_SEMICOLON);
+        return n;
     }
-    expect(TK_RBRACE, "預期 '}'");
-    sym_cnt = scope_mark;
-    return head;
+
+    if (check(p, TOK_FOR)) {
+        advance(p);
+        Node *n = node_new(ND_FOR, line);
+        expect(p, TOK_LPAREN);
+        if (!check(p, TOK_SEMICOLON)) {
+            if (is_type_start(p)) n->for_init = parse_local_decl(p);
+            else { n->for_init = node_new(ND_EXPR_STMT, line); node_add_child(n->for_init, parse_expr(p)); expect(p, TOK_SEMICOLON); }
+        } else advance(p);
+        if (!check(p, TOK_SEMICOLON)) n->for_cond = parse_expr(p);
+        expect(p, TOK_SEMICOLON);
+        if (!check(p, TOK_RPAREN)) n->for_post = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        n->for_body = parse_stmt(p);
+        return n;
+    }
+
+    if (check(p, TOK_RETURN)) {
+        advance(p);
+        Node *n = node_new(ND_RETURN, line);
+        if (!check(p, TOK_SEMICOLON))
+            n->ret_val = parse_expr(p);
+        expect(p, TOK_SEMICOLON);
+        return n;
+    }
+
+    if (check(p, TOK_BREAK)) {
+        advance(p); expect(p, TOK_SEMICOLON);
+        return node_new(ND_BREAK, line);
+    }
+
+    if (check(p, TOK_CONTINUE)) {
+        advance(p); expect(p, TOK_SEMICOLON);
+        return node_new(ND_CONTINUE, line);
+    }
+
+    if (check(p, TOK_SWITCH)) {
+        advance(p);
+        Node *n = node_new(ND_SWITCH, line);
+        expect(p, TOK_LPAREN);
+        n->cond = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        n->loop_body = parse_stmt(p);
+        return n;
+    }
+
+    if (check(p, TOK_CASE)) {
+        advance(p);
+        Node *n = node_new(ND_CASE, line);
+        n->cond = parse_expr(p);   /* case value */
+        expect(p, TOK_COLON);
+        /* collect body statements until next case/default/} */
+        Node *body = node_new(ND_BLOCK, line);
+        while (!check(p, TOK_CASE) && !check(p, TOK_DEFAULT) &&
+               !check(p, TOK_RBRACE) && !check(p, TOK_EOF))
+            node_add_child(body, parse_stmt(p));
+        node_add_child(n, body);
+        return n;
+    }
+
+    if (check(p, TOK_DEFAULT)) {
+        advance(p);
+        expect(p, TOK_COLON);
+        Node *n = node_new(ND_DEFAULT, line);
+        Node *body = node_new(ND_BLOCK, line);
+        while (!check(p, TOK_CASE) && !check(p, TOK_DEFAULT) &&
+               !check(p, TOK_RBRACE) && !check(p, TOK_EOF))
+            node_add_child(body, parse_stmt(p));
+        node_add_child(n, body);
+        return n;
+    }
+
+    if (check(p, TOK_GOTO)) {
+        advance(p);
+        Node *n  = node_new(ND_GOTO, line);
+        n->sval  = expect_ident(p);
+        expect(p, TOK_SEMICOLON);
+        return n;
+    }
+
+    /* label: ident ':' stmt  (must check before expr-stmt) */
+    if (check(p, TOK_IDENT) && peek(p).type == TOK_COLON) {
+        Node *n = node_new(ND_LABEL, line);
+        n->sval = strdup(p->cur.text);
+        advance(p); advance(p); /* eat ident and colon */
+        node_add_child(n, parse_stmt(p));
+        return n;
+    }
+
+    /* local decl */
+    if (is_type_start(p))
+        return parse_local_decl(p);
+
+    /* expression statement */
+    if (check(p, TOK_SEMICOLON)) { advance(p); return node_new(ND_BLOCK, line); }
+
+    Node *n = node_new(ND_EXPR_STMT, line);
+    node_add_child(n, parse_expr(p));
+    expect(p, TOK_SEMICOLON);
+    return n;
 }
 
-static ASTNode* parse_struct_decl_or_def() {
-    expect(TK_STRUCT, "預期 'struct'");
-    if (cur_tok.type != TK_IDENT) error("預期 struct 名稱");
-    char struct_name[64];
-    strcpy(struct_name, cur_tok.name);
-    next_token();
-    if (cur_tok.type == TK_LBRACE) {
-        int sid = struct_find(struct_name);
-        if (sid < 0) sid = add_struct_def(struct_name);
-        StructDef *def = get_struct_def(sid);
-        next_token();
-        while (cur_tok.type != TK_RBRACE && cur_tok.type != TK_EOF) {
-            if (def->field_cnt >= 64) error("struct 欄位過多");
-            CType fty = parse_type_allow_void(0);
-            if (cur_tok.type != TK_IDENT) error("預期欄位名稱");
-            StructField *f = &def->fields[def->field_cnt++];
-            strcpy(f->name, cur_tok.name);
-            f->ty = fty;
-            f->offset = def->size;
-            f->struct_id = last_struct_id;
-            def->size += type_size(fty, f->struct_id);
-            next_token();
-            expect(TK_SEMI, "預期 ';'");
-        }
-        expect(TK_RBRACE, "預期 '}'");
-        expect(TK_SEMI, "預期 ';'");
+static Node *parse_block(Parser *p) {
+    int line = p->cur.line;
+    expect(p, TOK_LBRACE);
+    Node *block = node_new(ND_BLOCK, line);
+    block->ival = 1;  /* 1 = create new scope */
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF))
+        node_add_child(block, parse_stmt(p));
+    expect(p, TOK_RBRACE);
+    return block;
+}
+
+/* ================================================================ Top-level */
+
+static Node *parse_toplevel(Parser *p) {
+    int line = p->cur.line;
+
+    /* skip leading GCC extensions/attributes */
+    skip_gcc_extension(p);
+
+    int is_typedef = 0, is_static = 0, is_extern = 0;
+    Type *base = parse_type_specifier(p, &is_typedef, &is_static, &is_extern);
+    if (!base) {
+        p_error(p, "expected declaration");
         return NULL;
     }
-    error("struct 宣告需有定義");
-    return NULL;
+
+    /* handle bare struct/enum with just semicolon */
+    if (check(p, TOK_SEMICOLON)) { advance(p); return node_new(ND_BLOCK, line); }
+
+    char *name = NULL;
+    Type *t    = parse_declarator(p, base, &name);
+
+    /* skip __attribute__ after declarator, before { or ; */
+    skip_gcc_extension(p);
+
+    if (is_typedef) {
+        if (name) register_typedef(p, name, t);
+        Node *td = node_new(ND_TYPEDEF, line);
+        td->typedef_name = name;
+        td->typedef_type = t;
+        expect(p, TOK_SEMICOLON);
+        return td;
+    }
+
+    /* function definition */
+    if (t->kind == TY_FUNC && check(p, TOK_LBRACE)) {
+        Node *fn       = node_new(ND_FUNC_DEF, line);
+        fn->func_name  = name;
+        fn->func_type  = t;
+        fn->is_static  = is_static;
+        fn->is_extern  = is_extern;
+        /* store param names */
+        fn->param_names = malloc(t->param_count * sizeof(char *));
+        for (int i = 0; i < t->param_count; i++)
+            fn->param_names[i] = t->params[i].name ? strdup(t->params[i].name) : NULL;
+        fn->loop_body = parse_block(p);
+        return fn;
+    }
+
+    /* global variable declaration */
+    Node *vd     = node_new(ND_VAR_DECL, line);
+    vd->var_name = name;
+    vd->var_type = t;
+    vd->is_global  = 1;
+    vd->is_static  = is_static;
+    vd->is_extern  = is_extern;
+    if (match(p, TOK_ASSIGN))
+        node_add_child(vd, parse_initializer(p));
+    /* handle multiple declarators on same line */
+    while (match(p, TOK_COMMA)) {
+        char *n2 = NULL;
+        Type *t2 = parse_declarator(p, base, &n2);
+        Node *vd2 = node_new(ND_VAR_DECL, line);
+        vd2->var_name = n2; vd2->var_type = t2; vd2->is_global = 1;
+        if (match(p, TOK_ASSIGN)) node_add_child(vd2, parse_initializer(p));
+        node_add_child(vd, vd2); /* chain */
+    }
+    expect(p, TOK_SEMICOLON);
+    return vd;
 }
 
-static ASTNode* parse_typedef_stmt() {
-    expect(TK_TYPEDEF, "預期 'typedef'");
-    if (cur_tok.type == TK_STRUCT) {
-        expect(TK_STRUCT, "預期 'struct'");
-        char struct_name[64] = {0};
-        if (cur_tok.type == TK_IDENT) {
-            strcpy(struct_name, cur_tok.name);
-            next_token();
+/* ================================================================ Public API */
+
+Parser *parser_new(Lexer *lexer) {
+    Parser *p = calloc(1, sizeof(Parser));
+    if (!p) { perror("calloc"); exit(1); }
+    p->lexer = lexer;
+    p->cur   = lexer_next(lexer);
+    /* Allocate pointer arrays for typedef and enum tables */
+    p->typedefs    = calloc(MAX_TYPEDEFS,    sizeof(TypedefEntry*));
+    p->enum_consts = calloc(MAX_ENUM_CONSTS, sizeof(EnumConst*));
+    p->structs     = calloc(MAX_STRUCT_DEFS, sizeof(StructEntry*));
+
+    /* pre-register common standard typedefs so system headers don't need to be parsed.
+       Use separate arrays to avoid struct array stride issues in self-hosted IR. */
+    {
+        /* td_names/td_kinds are provided by c0c_compat.c (static initializers
+           compile to null in c0c IR — we use accessor functions instead) */
+#ifndef __C0C__
+        extern const char *__c0c_get_td_name(int i);
+        extern int         __c0c_get_td_kind(int i);
+#endif
+        for (int i = 0; __c0c_get_td_name(i); i++) {
+            Type *t = type_new(__c0c_get_td_kind(i));
+            register_typedef(p, __c0c_get_td_name(i), t);
         }
-        int sid = -1;
-        if (cur_tok.type == TK_LBRACE) {
-            if (struct_name[0] == '\0') {
-                snprintf(struct_name, sizeof(struct_name), "__anon%d", g_struct_def_cnt);
-            }
-            sid = struct_find(struct_name);
-            if (sid < 0) sid = add_struct_def(struct_name);
-            StructDef *def = get_struct_def(sid);
-            next_token();
-            while (cur_tok.type != TK_RBRACE && cur_tok.type != TK_EOF) {
-                if (def->field_cnt >= 64) error("struct 欄位過多");
-                CType fty = parse_type_allow_void(0);
-                if (cur_tok.type != TK_IDENT) error("預期欄位名稱");
-                StructField *f = &def->fields[def->field_cnt++];
-                strcpy(f->name, cur_tok.name);
-                f->ty = fty;
-                f->offset = def->size;
-                f->struct_id = last_struct_id;
-                def->size += type_size(fty, f->struct_id);
-                next_token();
-                expect(TK_SEMI, "預期 ';'");
-            }
-            expect(TK_RBRACE, "預期 '}'");
-        } else {
-            if (struct_name[0] == '\0') error("預期 struct 名稱");
-            sid = struct_find(struct_name);
-            if (sid < 0) error("未知的 struct");
-        }
-        if (cur_tok.type != TK_IDENT) error("預期別名");
-        typedef_add(cur_tok.name, TY_STRUCT, sid);
-        next_token();
-        expect(TK_SEMI, "預期 ';'");
-        return NULL;
     }
-    CType ty = parse_type_allow_void(0);
-    if (cur_tok.type != TK_IDENT) error("預期別名");
-    typedef_add(cur_tok.name, ty, -1);
-    next_token();
-    expect(TK_SEMI, "預期 ';'");
-    return NULL;
+    return p;
 }
 
-static ASTNode* parse_switch_stmt() {
-    expect(TK_SWITCH, "預期 'switch'");
-    expect(TK_LPAREN, "預期 '('");
-    ASTNode *cond = parse_expr();
-    expect(TK_RPAREN, "預期 ')'");
-    expect(TK_LBRACE, "預期 '{'");
-
-    ASTNode *case_head = NULL, *case_tail = NULL;
-    while (cur_tok.type != TK_RBRACE && cur_tok.type != TK_EOF) {
-        ASTNode *c = new_node(AST_CASE);
-        if (cur_tok.type == TK_CASE) {
-            next_token();
-            if (cur_tok.type != TK_NUM && cur_tok.type != TK_CHAR_LIT) error("case 只支援數字");
-            c->val = cur_tok.val;
-            c->is_default = 0;
-            next_token();
-            expect(':', "預期 ':'");
-        } else if (cur_tok.type == TK_DEFAULT) {
-            next_token();
-            c->is_default = 1;
-            expect(':', "預期 ':'");
-        } else {
-            error("switch 內只能使用 case 或 default");
-        }
-
-        ASTNode *head = NULL, *tail = NULL;
-        while (cur_tok.type != TK_CASE && cur_tok.type != TK_DEFAULT &&
-               cur_tok.type != TK_RBRACE && cur_tok.type != TK_EOF) {
-            ASTNode *stmt = parse_stmt();
-            if (!head) head = tail = stmt; else { tail->next = stmt; tail = stmt; }
-        }
-        c->left = head;
-        if (!case_head) case_head = case_tail = c; else { case_tail->next = c; case_tail = c; }
+void parser_free(Parser *p) {
+    token_free(p->cur);
+    for (int i = 0; i < p->n_typedefs; i++) {
+        TypedefEntry *te = p->typedefs[i];
+        if (te) { free(te->name); free(te); }
     }
-    expect(TK_RBRACE, "預期 '}'");
-
-    ASTNode *sw = new_node(AST_SWITCH);
-    sw->cond = cond;
-    sw->left = case_head;
-    return sw;
+    free(p->typedefs);
+    for (int i = 0; i < p->n_enum_consts; i++) {
+        EnumConst *ec = p->enum_consts[i];
+        if (ec) { free(ec->name); free(ec); }
+    }
+    free(p->enum_consts);
+    for (int i = 0; i < p->n_structs; i++) {
+        StructEntry *se = p->structs[i];
+        if (se) { free(se->name); free(se); }
+    }
+    free(p->structs);
+    free(p);
 }
 
-static ASTNode* parse_do_stmt() {
-    expect(TK_DO, "預期 'do'");
-    ASTNode *body = NULL;
-    if (cur_tok.type == TK_LBRACE) {
-        body = parse_block();
-    } else {
-        body = parse_stmt();
+Node *parser_parse(Parser *p) {
+    Node *tu = node_new(ND_TRANSLATION_UNIT, 0);
+    while (!check(p, TOK_EOF)) {
+        /* skip stray semicolons between declarations */
+        while (match(p, TOK_SEMICOLON)) {}
+        skip_gcc_extension(p);
+        if (check(p, TOK_EOF)) break;
+        node_add_child(tu, parse_toplevel(p));
     }
-    expect(TK_WHILE, "預期 'while'");
-    expect(TK_LPAREN, "預期 '('");
-    ASTNode *cond = parse_expr();
-    expect(TK_RPAREN, "預期 ')'");
-    expect(TK_SEMI, "預期 ';'");
-    ASTNode *n = new_node(AST_DO);
-    n->cond = cond;
-    n->body = body;
-    return n;
-}
-
-static ASTNode* parse_decl_stmt(int expect_semi) {
-    CType decl_ty = parse_type();
-    ASTNode *n = new_node(AST_DECL);
-    strcpy(n->name, cur_tok.name);
-    expect(TK_IDENT, "預期變數名稱");
-    n->ty = decl_ty;
-    n->struct_id = last_struct_id;
-    n->array_len = 0;
-    n->init_kind = 0;
-
-    int unsized = 0;
-    if (cur_tok.type == '[') {
-        if (is_ptr(decl_ty)) error("指標型別不可再宣告為陣列");
-        next_token();
-        if (cur_tok.type == ']') {
-            unsized = 1;
-            n->array_len = -1;
-            next_token();
-        } else {
-            if (cur_tok.type != TK_NUM) error("陣列大小必須是數字");
-            n->array_len = cur_tok.val;
-            next_token();
-            expect(']', "預期 ']'");
-        }
-        n->ty = ptr_of(decl_ty);
-    }
-
-    if (cur_tok.type == TK_ASSIGN) {
-        next_token();
-        if (n->array_len != 0) {
-            if (cur_tok.type == TK_STR && (base_of(n->ty) == TY_CHAR || base_of(n->ty) == TY_UCHAR)) {
-                n->init_kind = 3;
-                strcpy(n->str_val, cur_tok.str_val);
-                next_token();
-            } else if (cur_tok.type == '{') {
-                n->init_kind = 2;
-                next_token();
-                ASTNode *head = NULL, *tail = NULL;
-                int count = 0;
-                if (cur_tok.type != '}') {
-                    head = tail = parse_expr();
-                    count++;
-                    while (cur_tok.type == TK_COMMA) {
-                        next_token();
-                        if (cur_tok.type == '}') break;
-                        tail->next = parse_expr();
-                        tail = tail->next;
-                        count++;
-                    }
-                }
-                expect('}', "預期 '}'");
-                n->left = head;
-                if (n->array_len == -1) n->array_len = count;
-                else if (count > n->array_len) error("陣列初始值過多");
-            } else {
-                error("陣列初始化需使用 { } 或字串");
-            }
-
-            if (n->array_len == -1 && n->init_kind == 3) {
-                n->array_len = (int)strlen(n->str_val) + 1;
-            }
-            if (n->array_len == -1 || n->array_len == 0) error("無法推導陣列大小");
-
-            if (base_of(n->ty) == TY_STRUCT && n->init_kind != 0) {
-                error("不支援 struct 陣列初始化");
-            }
-            if (n->init_kind == 3) {
-                int need = (int)strlen(n->str_val) + 1;
-                if (n->array_len < need) error("陣列大小不足以容納字串");
-            }
-        } else {
-            if (n->ty == TY_STRUCT) error("不支援 struct 直接初始化");
-            n->init_kind = 1;
-            n->left = parse_expr();
-        }
-    } else if (unsized) {
-        error("無法推導陣列大小");
-    }
-
-    if (expect_semi) expect(TK_SEMI, "預期 ';'");
-    return n;
-}
-
-static ASTNode* parse_if_stmt() {
-    expect(TK_IF, "預期 'if'");
-    expect(TK_LPAREN, "預期 '('");
-    ASTNode *cond = parse_expr();
-    expect(TK_RPAREN, "預期 ')'");
-
-    ASTNode *then_body = NULL;
-    if (cur_tok.type == TK_LBRACE) then_body = parse_block();
-    else then_body = parse_stmt();
-
-    ASTNode *else_body = NULL;
-    if (cur_tok.type == TK_ELSE) {
-        next_token();
-        if (cur_tok.type == TK_LBRACE) else_body = parse_block();
-        else else_body = parse_stmt();
-    }
-
-    ASTNode *n = new_node(AST_IF);
-    n->cond = cond;
-    n->then_body = then_body;
-    n->else_body = else_body;
-    return n;
-}
-
-static ASTNode* parse_while_stmt() {
-    expect(TK_WHILE, "預期 'while'");
-    expect(TK_LPAREN, "預期 '('");
-    ASTNode *cond = parse_expr();
-    expect(TK_RPAREN, "預期 ')'");
-    ASTNode *body = NULL;
-    if (cur_tok.type == TK_LBRACE) body = parse_block();
-    else body = parse_stmt();
-    ASTNode *n = new_node(AST_WHILE);
-    n->cond = cond;
-    n->body = body;
-    return n;
-}
-
-static ASTNode* parse_for_stmt() {
-    expect(TK_FOR, "預期 'for'");
-    expect(TK_LPAREN, "預期 '('");
-    ASTNode *init = NULL;
-    ASTNode *cond = NULL;
-    ASTNode *update = NULL;
-
-    if (cur_tok.type != TK_SEMI) {
-        if (is_type_start()) {
-            if (cur_tok.type == TK_STRUCT && is_struct_def_ahead()) {
-                error("for 內不支援 struct 定義");
-            }
-            ASTNode *decl = parse_decl_stmt(0);
-            sym_add(decl->name, decl->ty, decl->array_len, decl->struct_id);
-            init = decl;
-        } else if (cur_tok.type == TK_IDENT) {
-            char *saved_p = p; Token saved_tok = cur_tok;
-            next_token();
-            int is_assign = (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                             cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                             cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ);
-            p = saved_p; cur_tok = saved_tok;
-            if (is_assign) {
-                ASTNode *assign = new_node(AST_ASSIGN);
-                assign->left = make_var_node(cur_tok.name);
-                assign->ty = assign->left->ty;
-                next_token();
-                if (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                    cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                    cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ) {
-                    assign->op = cur_tok.type;
-                    next_token();
-                } else {
-                    error("預期 assignment 運算子");
-                }
-                assign->right = parse_expr();
-                init = assign;
-            } else {
-                ASTNode *expr = parse_expr();
-                init = new_node(AST_EXPR_STMT);
-                init->left = expr;
-            }
-        } else {
-            ASTNode *expr = parse_expr();
-            init = new_node(AST_EXPR_STMT);
-            init->left = expr;
-        }
-    }
-    expect(TK_SEMI, "預期 ';'");
-
-    if (cur_tok.type != TK_SEMI) {
-        cond = parse_expr();
-    }
-    expect(TK_SEMI, "預期 ';'");
-
-    if (cur_tok.type != TK_RPAREN) {
-        if (cur_tok.type == TK_IDENT) {
-            char *saved_p = p; Token saved_tok = cur_tok;
-            next_token();
-            int is_assign = (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                             cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                             cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ);
-            p = saved_p; cur_tok = saved_tok;
-            if (is_assign) {
-                ASTNode *assign = new_node(AST_ASSIGN);
-                assign->left = make_var_node(cur_tok.name);
-                assign->ty = assign->left->ty;
-                next_token();
-                if (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                    cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                    cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ) {
-                    assign->op = cur_tok.type;
-                    next_token();
-                } else {
-                    error("預期 assignment 運算子");
-                }
-                assign->right = parse_expr();
-                update = assign;
-            } else {
-                update = parse_expr();
-            }
-        } else {
-            update = parse_expr();
-        }
-    }
-    expect(TK_RPAREN, "預期 ')'");
-
-    ASTNode *body = NULL;
-    if (cur_tok.type == TK_LBRACE) body = parse_block();
-    else body = parse_stmt();
-
-    ASTNode *n = new_node(AST_FOR);
-    n->init = init;
-    n->cond = cond;
-    n->update = update;
-    n->body = body;
-    return n;
-}
-
-static ASTNode* parse_break_stmt() {
-    expect(TK_BREAK, "預期 'break'");
-    ASTNode *n = new_node(AST_BREAK);
-    expect(TK_SEMI, "預期 ';'");
-    return n;
-}
-
-static ASTNode* parse_continue_stmt() {
-    expect(TK_CONTINUE, "預期 'continue'");
-    ASTNode *n = new_node(AST_CONTINUE);
-    expect(TK_SEMI, "預期 ';'");
-    return n;
-}
-
-static ASTNode* parse_stmt() {
-    if (cur_tok.type == TK_TYPEDEF) {
-        ASTNode *n = parse_typedef_stmt();
-        if (n) return n;
-        ASTNode *empty = new_node(AST_EXPR_STMT);
-        empty->left = NULL;
-        return empty;
-    } else if (cur_tok.type == TK_STRUCT && is_struct_def_ahead()) {
-        ASTNode *n = parse_struct_decl_or_def();
-        if (n) return n;
-        ASTNode *empty = new_node(AST_EXPR_STMT);
-        empty->left = NULL;
-        return empty;
-    } else if (is_type_start()) {
-        ASTNode *n = parse_decl_stmt(1);
-        sym_add(n->name, n->ty, n->array_len, n->struct_id);
-        return n;
-    } else if (cur_tok.type == TK_LBRACE) {
-        ASTNode *n = new_node(AST_BLOCK);
-        n->left = parse_block();
-        return n;
-    } else if (cur_tok.type == TK_IF) {
-        return parse_if_stmt();
-    } else if (cur_tok.type == TK_SWITCH) {
-        return parse_switch_stmt();
-    } else if (cur_tok.type == TK_DO) {
-        return parse_do_stmt();
-    } else if (cur_tok.type == TK_WHILE) {
-        return parse_while_stmt();
-    } else if (cur_tok.type == TK_FOR) {
-        return parse_for_stmt();
-    } else if (cur_tok.type == TK_BREAK) {
-        return parse_break_stmt();
-    } else if (cur_tok.type == TK_CONTINUE) {
-        return parse_continue_stmt();
-    } else if (cur_tok.type == TK_RETURN) {
-        next_token();
-        ASTNode *n = new_node(AST_RETURN);
-        if (cur_tok.type == TK_SEMI) {
-            if (current_func_ret != TY_VOID) error("非 void 函式必須回傳值");
-            n->left = NULL;
-            n->ty = TY_VOID;
-            next_token();
-        } else {
-            if (current_func_ret == TY_VOID) error("void 函式不能回傳值");
-            n->left = parse_expr();
-            n->ty = current_func_ret;
-            expect(TK_SEMI, "預期 ';'");
-        }
-        return n;
-    } else if (cur_tok.type == TK_IDENT || cur_tok.type == TK_MUL) {
-        if (cur_tok.type == TK_IDENT) {
-            char *saved_p2 = p; Token saved_tok2 = cur_tok;
-            next_token();
-            int is_call = (cur_tok.type == TK_LPAREN);
-            p = saved_p2; cur_tok = saved_tok2;
-            if (is_call) {
-                ASTNode *n = new_node(AST_EXPR_STMT);
-                n->left = parse_expr();
-                expect(TK_SEMI, "預期 ';'");
-                return n;
-            }
-        }
-        char *saved_p = p; Token saved_tok = cur_tok; int saved_line = cur_line; int saved_col = cur_col;
-        ASTNode *cand = parse_unary();
-        int is_lvalue = (cand->type == AST_VAR || cand->type == AST_INDEX || cand->type == AST_DEREF || cand->type == AST_MEMBER);
-        int is_assign = is_lvalue && (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                                      cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                                      cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ);
-        p = saved_p; cur_tok = saved_tok; cur_line = saved_line; cur_col = saved_col;
-        if (is_assign) {
-            ASTNode *lv = parse_lvalue();
-            ASTNode *n = new_node(AST_ASSIGN);
-            n->left = lv;
-            n->ty = lv->ty;
-            if (cur_tok.type == TK_ASSIGN || cur_tok.type == TK_PLUSEQ ||
-                cur_tok.type == TK_MINUSEQ || cur_tok.type == TK_MULEQ ||
-                cur_tok.type == TK_DIVEQ || cur_tok.type == TK_MODEQ) {
-                n->op = cur_tok.type;
-                next_token();
-            } else {
-                error("預期 assignment 運算子");
-            }
-            n->right = parse_expr();
-            expect(TK_SEMI, "預期 ';'");
-            return n;
-        }
-        ASTNode *n = new_node(AST_EXPR_STMT);
-        n->left = parse_expr();
-        expect(TK_SEMI, "預期 ';'");
-        return n;
-    }
-    error("未知的陳述式 (Statement)");
-    return NULL;
-}
-
-static ASTNode* parse_func() {
-    CType ret_ty = parse_type_allow_void(1);
-    int ret_struct_id = last_struct_id;
-    ASTNode *func = new_node(AST_FUNC);
-    func->ty = ret_ty;
-    strcpy(func->name, cur_tok.name);
-    expect(TK_IDENT, "預期函數名稱");
-    expect(TK_LPAREN, "預期 '('");
-
-    sym_reset();
-    ASTNode *param_head = NULL, *param_tail = NULL;
-    CType param_types[16];
-    int param_struct_ids[16];
-    int param_cnt = 0;
-    if (cur_tok.type != TK_RPAREN) {
-        if (cur_tok.type == TK_VOID) {
-            next_token();
-            if (cur_tok.type != TK_RPAREN) error("void 參數列表不可有名稱");
-        } else {
-        while (1) {
-            CType pty = parse_type();
-            ASTNode *param = new_node(AST_DECL);
-            strcpy(param->name, cur_tok.name);
-            expect(TK_IDENT, "預期參數名稱");
-            param->ty = pty;
-            param->array_len = 0;
-            param->init_kind = 0;
-            param->struct_id = last_struct_id;
-            if (param_cnt >= 16) error("參數過多");
-            param_types[param_cnt] = pty;
-            param_struct_ids[param_cnt] = last_struct_id;
-            param_cnt++;
-            sym_add(param->name, pty, 0, param->struct_id);
-            if (!param_head) param_head = param_tail = param;
-            else { param_tail->next = param; param_tail = param; }
-            if (cur_tok.type == TK_COMMA) { next_token(); continue; }
-            break;
-        }
-        }
-    }
-    expect(TK_RPAREN, "預期 ')'");
-    func_add(func->name, ret_ty, ret_struct_id, param_types, param_struct_ids, param_cnt);
-    if (cur_tok.type == TK_SEMI) {
-        next_token();
-        func->left = param_head;
-        func->right = NULL;
-        func->is_decl = 1;
-        return func;
-    }
-
-    current_func_ret = ret_ty;
-    ASTNode *body = parse_block();
-    func->left = param_head;
-    func->right = body;
-    func->is_decl = 0;
-    return func;
-}
-
-ASTNode* parse_program(void) {
-    ASTNode *head = NULL, *tail = NULL;
-    while (cur_tok.type != TK_EOF) {
-        if (cur_tok.type == TK_STRUCT && is_struct_def_ahead()) {
-            parse_struct_decl_or_def();
-            continue;
-        }
-        if (cur_tok.type == TK_TYPEDEF) {
-            parse_typedef_stmt();
-            continue;
-        }
-        if (is_type_start() && !is_func_def_ahead()) {
-            ASTNode *g = parse_decl_stmt(1);
-            g->type = AST_GLOBAL;
-            global_add(g->name, g->ty, g->array_len, g->struct_id);
-            if (!head) head = tail = g; else { tail->next = g; tail = g; }
-            continue;
-        }
-        ASTNode *func = parse_func();
-        if (!head) head = tail = func; else { tail->next = func; tail = func; }
-    }
-    return head;
+    return tu;
 }

@@ -7,49 +7,40 @@
 	.type	main,@function
 main:                                   # @main
 # %bb.0:
-	addi	sp, sp, -32
-	sd	ra, 24(sp)                      # 8-byte Folded Spill
-	sd	s0, 16(sp)                      # 8-byte Folded Spill
-	addi	s0, sp, 32
+	addi	sp, sp, -48
+	sd	ra, 40(sp)                      # 8-byte Folded Spill
+	sd	s0, 32(sp)                      # 8-byte Folded Spill
+	addi	s0, sp, 48
 	li	a0, 0
 	sw	a0, -20(s0)
-	li	a1, 10
-	sw	a1, -24(s0)
-	li	a1, 5
-	sw	a1, -28(s0)
+	li	a0, 12
+	sw	a0, -24(s0)
+	li	a0, 10
+	sw	a0, -28(s0)
+	lw	a0, -24(s0)
+	lw	a1, -28(s0)
+	and	a0, a0, a1
 	sw	a0, -32(s0)
+	lw	a0, -24(s0)
+	lw	a1, -28(s0)
+	or	a0, a0, a1
+	sw	a0, -36(s0)
+	lw	a0, -24(s0)
+	lw	a1, -28(s0)
+	xor	a0, a0, a1
+	sw	a0, -40(s0)
+	lw	a0, -36(s0)
+	slliw	a0, a0, 2
+	sw	a0, -44(s0)
 	lw	a0, -32(s0)
-	lw	a1, -24(s0)
-	lw	a2, -28(s0)
-	and	a1, a1, a2
+	lw	a1, -40(s0)
+	addw	a1, a0, a1
+	lw	a0, -44(s0)
 	addw	a0, a0, a1
-	sw	a0, -32(s0)
-	lw	a0, -32(s0)
-	lw	a1, -24(s0)
-	lw	a2, -28(s0)
-	or	a1, a1, a2
-	addw	a0, a0, a1
-	sw	a0, -32(s0)
-	lw	a0, -32(s0)
-	lw	a1, -24(s0)
-	lw	a2, -28(s0)
-	xor	a1, a1, a2
-	addw	a0, a0, a1
-	sw	a0, -32(s0)
-	lw	a0, -32(s0)
-	lw	a1, -24(s0)
-	slliw	a1, a1, 1
-	addw	a0, a0, a1
-	sw	a0, -32(s0)
-	lw	a0, -32(s0)
-	lw	a1, -24(s0)
-	srli	a1, a1, 1
-	addw	a0, a0, a1
-	sw	a0, -32(s0)
-	lbu	a0, -32(s0)
-	ld	ra, 24(sp)                      # 8-byte Folded Reload
-	ld	s0, 16(sp)                      # 8-byte Folded Reload
-	addi	sp, sp, 32
+	addiw	a0, a0, -10
+	ld	ra, 40(sp)                      # 8-byte Folded Reload
+	ld	s0, 32(sp)                      # 8-byte Folded Reload
+	addi	sp, sp, 48
 	ret
 .Lfunc_end0:
 	.size	main, .Lfunc_end0-main

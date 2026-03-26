@@ -1,3 +1,0 @@
-LOAD_CONST      1          _    t0
-STORE           t0         _    x
-HALT            _          _    _

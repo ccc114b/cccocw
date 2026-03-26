@@ -1,1478 +1,1751 @@
 #include "codegen.h"
-#include "lexer.h"
+#include "ast.h"
+#include "lexer.h"   /* for operator token types */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum {
-    VT_I1,
-    VT_I8,
-    VT_I16,
-    VT_I32,
-    VT_I64,
-    VT_F32,
-    VT_F64,
-    VT_PTR
-} ValueType;
+/* ================================================================
+   LLVM IR Code Generator
+   Strategy:
+   - Every expression returns a "Value" (SSA register name or constant string).
+   - Local variables are alloca'd; loads/stores are explicit.
+   - We use a simple counter for %tmp registers and labels.
+   ================================================================ */
+
+#define MAX_LOCALS  2048
+#define MAX_GLOBALS 2048
+#define MAX_STRINGS 2048
 
 typedef struct {
-    char *reg;
-    ValueType vt;
-    CType cty;
-} Value;
+    char *name;       /* C name */
+    char *llvm_name;  /* alloca register, e.g. %x */
+    Type *type;
+    int   is_param;   /* parameters: already a register, no alloca needed */
+} Local;
 
 typedef struct {
-    char name[64];
-    CType ret;
-    int ret_struct_id;
-    CType params[16];
-    int param_struct_id[16];
-    int param_cnt;
-} FuncSig;
+    char *name;
+    Type *type;
+    int   is_extern;
+} Global;
 
-static int reg_cnt = 0;
-static int label_cnt = 0;
-static char string_table[100][256];
-static int string_cnt = 0;
-static ASTNode *current_params = NULL;
-static CType current_ret_ty = TY_INT;
-static int break_label_stack[128];
-static int continue_label_stack[128];
-static int loop_depth = 0;
-static int switch_break_stack[128];
-static int switch_depth = 0;
-static FILE *out_fp = NULL;
-static FuncSig func_sigs[128];
-static int func_sig_cnt = 0;
-static int var_id = 0;
+struct Codegen {
+    FILE   *out;
+    const char *source_filename;
 
-typedef struct {
-    char name[64];
-    char ir[64];
-    CType ty;
-    int array_len;
-    int struct_id;
-    int is_global;
-} VarSlot;
+    /* counters */
+    int    reg;      /* SSA register counter */
+    int    label;    /* label counter */
+    int    str_id;   /* string literal counter */
 
-static VarSlot var_slots[512];
-static int var_cnt = 0;
-static VarSlot global_slots[256];
-static int global_cnt = 0;
-static int scope_marks[128];
-static int scope_depth = 0;
+    /* scope */
+    Local   locals[MAX_LOCALS];
+    int     n_locals;
+    int     scope_stack[64];  /* n_locals at scope entry */
+    int     scope_depth;
 
-static int add_string_literal(const char *s) {
-    if (string_cnt >= 100) error("字串常數過多");
-    strcpy(string_table[string_cnt], s);
-    return string_cnt++;
+    /* globals */
+    Global  globals[MAX_GLOBALS];
+    int     n_globals;
+
+    /* string literals deferred to top-level */
+    char   *str_literals[MAX_STRINGS];
+    int     str_ids[MAX_STRINGS];
+    int     n_strings;
+
+    /* break/continue targets */
+    char   break_label[64];
+    char   cont_label[64];
+
+    /* current function return type */
+    Type  *cur_ret_type;
+    char   cur_func[128];
+};
+
+/* ---------------------------------------------------------------- helpers */
+
+static int new_reg(Codegen *cg)   { return cg->reg++; }
+static int new_label(Codegen *cg) { return cg->label++; }
+
+/* Format a register reference — we use named %tN registers to avoid
+   LLVM's strict sequential-numbering requirement for unnamed values */
+static const char *reg_name(int r, char *buf, size_t sz) {
+    snprintf(buf, sz, "%%t%d", r);
+    return buf;
+}
+#define REGBUF(r) (reg_name((r), (char[32]){0}, 32))
+
+/* __c0c_emit: provided by c0c_compat.c.
+   Only declare for the host C compiler — c0c uses the IR header declare. */
+#ifndef __C0C__
+extern void __c0c_emit(FILE *out, const char *fmt, ...);
+#endif
+
+#define EMIT_BUF_SIZE 8192  /* kept for reference */
+
+/* Convert our Type to LLVM IR type string (static buffer rotation.
+   Use a global char pointer backed by a fixed array.
+   Named individually so c0c initializes each as a separate global. */
+#define N_TBUFS 8
+#define TBUF_SIZE 256
+/* __c0c_get_tbuf: provided by c0c_compat.c, returns tbuf[i%8].
+   In c0c IR this becomes 'declare ptr @__c0c_get_tbuf(i32)' from the header. */
+#ifndef __C0C__
+extern char *__c0c_get_tbuf(int i);
+#endif
+static int   tbuf_idx = 0;
+
+static const char *llvm_type(const Type *t) {
+    char *buf = __c0c_get_tbuf(tbuf_idx++);
+    if (!buf) buf = __c0c_get_tbuf(0);  /* safety fallback */
+    if (!t) { strcpy(buf, "i32"); return buf; }
+    switch (t->kind) {
+    case TY_VOID:      strcpy(buf, "void");   break;
+    case TY_BOOL:      strcpy(buf, "i1");     break;
+    case TY_CHAR: case TY_SCHAR: case TY_UCHAR: strcpy(buf, "i8");  break;
+    case TY_SHORT: case TY_USHORT: strcpy(buf, "i16"); break;
+    case TY_INT: case TY_UINT: case TY_ENUM: strcpy(buf, "i32"); break;
+    case TY_LONG: case TY_ULONG:
+    case TY_LONGLONG: case TY_ULONGLONG: strcpy(buf, "i64"); break;
+    case TY_FLOAT:     strcpy(buf, "float");  break;
+    case TY_DOUBLE:    strcpy(buf, "double"); break;
+    case TY_PTR:       strcpy(buf, "ptr");    break;
+    case TY_ARRAY:     strcpy(buf, "ptr");    break;
+    case TY_FUNC:      strcpy(buf, "ptr");    break;
+    case TY_STRUCT:
+    case TY_UNION:
+        if (t->tag) snprintf(buf, 256, "%%struct.%s", t->tag);
+        else strcpy(buf, "ptr");
+        break;
+    case TY_TYPEDEF_REF:
+        /* best effort – treat as i64 */
+        strcpy(buf, "i64");
+        break;
+    default: strcpy(buf, "i64"); break;
+    }
+    return buf;
 }
 
-static void build_llvm_string(const char *src, char *dst, int *out_len) {
-    int out = 0;
+static const char *llvm_ret_type(const Type *ft) {
+    if (!ft || ft->kind != TY_FUNC) return "i32";
+    return llvm_type(ft->ret);
+}
+
+static int type_is_fp(const Type *t) {
+    if (!t) return 0;
+    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE;
+}
+
+/* ---------------------------------------------------------------- scope */
+
+static void scope_push(Codegen *cg) {
+    cg->scope_stack[cg->scope_depth++] = cg->n_locals;
+}
+
+static void scope_pop(Codegen *cg) {
+    int prev = cg->scope_stack[--cg->scope_depth];
+    for (int i = prev; i < cg->n_locals; i++) {
+        free(cg->locals[i].name);
+        free(cg->locals[i].llvm_name);
+        /* types owned by AST */
+    }
+    cg->n_locals = prev;
+}
+
+static Local *find_local(Codegen *cg, const char *name) {
+    for (int i = cg->n_locals - 1; i >= 0; i--)
+        if (strcmp(cg->locals[i].name, name) == 0)
+            return &cg->locals[i];
+    return NULL;
+}
+
+static Global *find_global(Codegen *cg, const char *name) {
+    for (int i = 0; i < cg->n_globals; i++)
+        if (strcmp(cg->globals[i].name, name) == 0)
+            return &cg->globals[i];
+    return NULL;
+}
+
+static Local *add_local(Codegen *cg, const char *name, Type *type, int is_param) {
+    if (cg->n_locals >= MAX_LOCALS) { fprintf(stderr, "c0c: too many locals\n"); exit(1); }
+    Local *l  = &cg->locals[cg->n_locals++];
+    l->name   = strdup(name);
+    int rid   = new_reg(cg);
+    l->llvm_name = malloc(32);
+    snprintf(l->llvm_name, 32, "%%t%d", rid);
+    l->type   = type;
+    l->is_param = is_param;
+    return l;
+}
+
+/* ---------------------------------------------------------------- string literals */
+
+static int intern_string(Codegen *cg, const char *raw) {
+    /* raw includes surrounding quotes */
+    int id = cg->str_id++;
+    cg->str_literals[cg->n_strings] = strdup(raw);
+    cg->str_ids[cg->n_strings]      = id;
+    cg->n_strings++;
+    return id;
+}
+
+/* Compute byte length of a C string literal (handles \n etc.) */
+static int str_literal_len(const char *raw) {
+    /* raw: "hello\n" */
     int len = 0;
-    const unsigned char *p = (const unsigned char*)src;
-    while (*p) {
-        unsigned char c = *p++;
-        if (c == '\n') {
-            out += sprintf(dst + out, "\\0A");
-        } else if (c == '\t') {
-            out += sprintf(dst + out, "\\09");
-        } else if (c == '\r') {
-            out += sprintf(dst + out, "\\0D");
-        } else if (c == '\\') {
-            out += sprintf(dst + out, "\\5C");
-        } else if (c == '\"') {
-            out += sprintf(dst + out, "\\22");
-        } else if (c < 32 || c >= 127) {
-            out += sprintf(dst + out, "\\%02X", c);
-        } else {
-            dst[out++] = (char)c;
-            dst[out] = '\0';
-        }
+    const char *p = raw + 1; /* skip opening " */
+    while (*p && *p != '"') {
+        if (*p == '\\') { p++; if (*p) p++; }
+        else p++;
         len++;
     }
-    strcat(dst, "\\00");
-    len++;
-    if (out_len) *out_len = len;
+    return len + 1; /* +1 for NUL */
 }
 
-static int is_ptr(CType ty) {
-    return ty == TY_INT_PTR || ty == TY_UINT_PTR || ty == TY_SHORT_PTR || ty == TY_USHORT_PTR ||
-           ty == TY_LONG_PTR || ty == TY_ULONG_PTR || ty == TY_CHAR_PTR || ty == TY_UCHAR_PTR ||
-           ty == TY_FLOAT_PTR || ty == TY_DOUBLE_PTR || ty == TY_STRUCT_PTR;
-}
-static int is_float(CType ty) { return ty == TY_FLOAT || ty == TY_DOUBLE; }
-static int is_int(CType ty) {
-    return ty == TY_CHAR || ty == TY_UCHAR || ty == TY_SHORT || ty == TY_USHORT ||
-           ty == TY_INT || ty == TY_UINT || ty == TY_LONG || ty == TY_ULONG;
-}
-static int is_unsigned(CType ty) {
-    return ty == TY_UCHAR || ty == TY_USHORT || ty == TY_UINT || ty == TY_ULONG;
-}
-static int int_rank(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return 1;
-    if (ty == TY_SHORT || ty == TY_USHORT) return 2;
-    if (ty == TY_INT || ty == TY_UINT) return 3;
-    if (ty == TY_LONG || ty == TY_ULONG) return 4;
-    return 0;
-}
-static CType int_promote(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR || ty == TY_SHORT || ty == TY_USHORT) return TY_INT;
-    return ty;
-}
-static CType int_type_from_rank(int rank, int is_uns) {
-    if (rank == 1) return is_uns ? TY_UCHAR : TY_CHAR;
-    if (rank == 2) return is_uns ? TY_USHORT : TY_SHORT;
-    if (rank == 3) return is_uns ? TY_UINT : TY_INT;
-    if (rank == 4) return is_uns ? TY_ULONG : TY_LONG;
-    return TY_INT;
-}
-static CType common_arith_type(CType a, CType b) {
-    if (is_float(a) || is_float(b)) {
-        if (a == TY_DOUBLE || b == TY_DOUBLE) return TY_DOUBLE;
-        return TY_FLOAT;
-    }
-    a = int_promote(a);
-    b = int_promote(b);
-    int ra = int_rank(a);
-    int rb = int_rank(b);
-    int ua = is_unsigned(a);
-    int ub = is_unsigned(b);
-    if (ra == rb) return int_type_from_rank(ra, ua || ub);
-    if (ra > rb) {
-        if (ua) return int_type_from_rank(ra, 1);
-        if (ub) return int_type_from_rank(ra, 0);
-        return int_type_from_rank(ra, 0);
-    } else {
-        if (ub) return int_type_from_rank(rb, 1);
-        if (ua) return int_type_from_rank(rb, 0);
-        return int_type_from_rank(rb, 0);
-    }
-}
-static CType base_of(CType ty) {
-    if (ty == TY_CHAR_PTR) return TY_CHAR;
-    if (ty == TY_UCHAR_PTR) return TY_UCHAR;
-    if (ty == TY_SHORT_PTR) return TY_SHORT;
-    if (ty == TY_USHORT_PTR) return TY_USHORT;
-    if (ty == TY_INT_PTR) return TY_INT;
-    if (ty == TY_UINT_PTR) return TY_UINT;
-    if (ty == TY_LONG_PTR) return TY_LONG;
-    if (ty == TY_ULONG_PTR) return TY_ULONG;
-    if (ty == TY_FLOAT_PTR) return TY_FLOAT;
-    if (ty == TY_DOUBLE_PTR) return TY_DOUBLE;
-    if (ty == TY_STRUCT_PTR) return TY_STRUCT;
-    return TY_INT;
-}
-static const char* llvm_type(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return "i8";
-    if (ty == TY_SHORT || ty == TY_USHORT) return "i16";
-    if (ty == TY_INT || ty == TY_UINT) return "i32";
-    if (ty == TY_LONG || ty == TY_ULONG) return "i64";
-    if (ty == TY_FLOAT) return "float";
-    if (ty == TY_DOUBLE) return "double";
-    if (ty == TY_VOID) return "void";
-    return "ptr";
-}
-static const char* llvm_elem_type(CType ty) {
-    CType base = is_ptr(ty) ? base_of(ty) : ty;
-    if (base == TY_CHAR || base == TY_UCHAR) return "i8";
-    if (base == TY_SHORT || base == TY_USHORT) return "i16";
-    if (base == TY_INT || base == TY_UINT) return "i32";
-    if (base == TY_LONG || base == TY_ULONG) return "i64";
-    if (base == TY_FLOAT) return "float";
-    if (base == TY_DOUBLE) return "double";
-    return "i8";
-}
-
-static int stmt_ends_with_return(ASTNode *node);
-static int stmt_list_ends_with_return(ASTNode *node);
-static int stmt_may_fallthrough(ASTNode *node);
-static int stmt_list_may_fallthrough(ASTNode *node);
-static Value gen_cond(ASTNode *node);
-static Value gen_expr(ASTNode *node);
-static Value gen_lvalue_addr(ASTNode *node);
-static int struct_size(int struct_id);
-static void global_add(const char *name, CType ty, int array_len, int struct_id);
-
-static int is_zero_literal(ASTNode *n) {
-    return n && n->type == AST_NUM && n->val == 0;
-}
-
-static void emit_int_const(CType ty, long long v) {
-    fprintf(out_fp, "%s %lld", llvm_type(ty), v);
-}
-
-static void emit_float_const(CType ty, double v) {
-    const char *fty = (ty == TY_DOUBLE) ? "double" : "float";
-    fprintf(out_fp, "%s %.17g", fty, v);
-}
-
-static void emit_global_scalar(ASTNode *g) {
-    const char *name = g->name;
-    if (g->ty == TY_STRUCT) {
-        int sz = struct_size(g->struct_id);
-        if (g->init_kind != 0) error("全域 struct 不支援初始化");
-        fprintf(out_fp, "@%s = global [%d x i8] zeroinitializer\n", name, sz);
-        return;
-    }
-    fprintf(out_fp, "@%s = global %s ", name, llvm_type(g->ty));
-    if (g->init_kind == 0) {
-        if (is_ptr(g->ty)) fprintf(out_fp, "null\n");
-        else if (is_float(g->ty)) fprintf(out_fp, "0.0\n");
-        else fprintf(out_fp, "0\n");
-        return;
-    }
-    if (g->init_kind != 1) error("全域變數初始化需為常數");
-    ASTNode *v = g->left;
-    if (is_ptr(g->ty)) {
-        if (is_zero_literal(v)) {
-            fprintf(out_fp, "null\n");
-            return;
-        }
-        if ((g->ty == TY_CHAR_PTR || g->ty == TY_UCHAR_PTR) && v->type == AST_STR) {
-            int id = add_string_literal(v->str_val);
-            int len = (int)strlen(v->str_val) + 1;
-            fprintf(out_fp, "getelementptr ([%d x i8], ptr @.str.%d, i32 0, i32 0)\n", len, id);
-            return;
-        }
-        error("全域指標初始化只支援 0 或字串");
-    }
-    if (is_float(g->ty)) {
-        double fv = (v->type == AST_FLOAT) ? v->fval : (double)v->val;
-        emit_float_const(g->ty, fv);
-        fprintf(out_fp, "\n");
-        return;
-    }
-    if (v->type != AST_NUM && v->type != AST_FLOAT) error("全域變數初始化需為常數");
-    emit_int_const(g->ty, (long long)(v->type == AST_FLOAT ? (long long)v->fval : v->val));
-    fprintf(out_fp, "\n");
-}
-
-static void emit_global_array(ASTNode *g) {
-    const char *name = g->name;
-    CType elem = base_of(g->ty);
-    if (elem == TY_STRUCT) {
-        int total = g->array_len * struct_size(g->struct_id);
-        if (g->init_kind != 0) error("全域 struct 陣列不支援初始化");
-        fprintf(out_fp, "@%s = global [%d x i8] zeroinitializer\n", name, total);
-        return;
-    }
-    if (g->init_kind == 3 && (elem == TY_CHAR || elem == TY_UCHAR)) {
-        char llvm_str[1024] = {0};
-        int len = 0;
-        build_llvm_string(g->str_val, llvm_str, &len);
-        while (len < g->array_len) {
-            strcat(llvm_str, "\\00");
-            len++;
-        }
-        fprintf(out_fp, "@%s = global [%d x i8] c\"%s\"\n", name, g->array_len, llvm_str);
-        return;
-    }
-    if (is_ptr(elem)) error("全域指標陣列不支援初始化");
-    fprintf(out_fp, "@%s = global [%d x %s] ", name, g->array_len, llvm_elem_type(g->ty));
-    if (g->init_kind == 0) {
-        fprintf(out_fp, "zeroinitializer\n");
-        return;
-    }
-    if (g->init_kind != 2) error("全域陣列初始化需為常數列表");
-    fprintf(out_fp, "[");
-    ASTNode *cur = g->left;
-    for (int i = 0; i < g->array_len; i++) {
-        if (i > 0) fprintf(out_fp, ", ");
-        if (cur) {
-            if (is_float(elem)) {
-                double fv = (cur->type == AST_FLOAT) ? cur->fval : (double)cur->val;
-                emit_float_const(elem, fv);
-            } else {
-                if (cur->type != AST_NUM && cur->type != AST_FLOAT) error("全域陣列初始化需為常數");
-                emit_int_const(elem, (long long)(cur->type == AST_FLOAT ? (long long)cur->fval : cur->val));
+/* Emit string literal content suitable for LLVM c"..." */
+static void emit_str_content(Codegen *cg, const char *raw) {
+    const char *p = raw + 1;
+    while (*p && *p != '"') {
+        if (*p == '\\' && *(p+1)) {
+            p++;
+            switch (*p) {
+            case 'n': __c0c_emit(cg->out, "\\0A"); break;
+            case 't': __c0c_emit(cg->out, "\\09"); break;
+            case 'r': __c0c_emit(cg->out, "\\0D"); break;
+            case '0': __c0c_emit(cg->out, "\\00"); break;
+            case '"': __c0c_emit(cg->out, "\\22"); break;
+            case '\\': __c0c_emit(cg->out, "\\5C"); break;
+            default:  __c0c_emit(cg->out, "\\%02X", (unsigned char)*p); break;
             }
-            cur = cur->next;
+            p++;
         } else {
-            if (is_float(elem)) emit_float_const(elem, 0.0);
-            else emit_int_const(elem, 0);
+            if (*p == '"') break;
+            __c0c_emit(cg->out, "%c", *p++);
         }
     }
-    fprintf(out_fp, "]\n");
+    __c0c_emit(cg->out, "\\00"); /* NUL terminator */
 }
 
-static void emit_globals(ASTNode *nodes) {
-    for (ASTNode *n = nodes; n; n = n->next) {
-        if (n->type != AST_GLOBAL) continue;
-        global_add(n->name, n->ty, n->array_len, n->struct_id);
-        if (n->array_len > 0) emit_global_array(n);
-        else emit_global_scalar(n);
-    }
-}
+/* ---------------------------------------------------------------- forward decl */
 
-static int is_param(ASTNode *params, const char *name) {
-    ASTNode *pnode = params;
-    while (pnode) {
-        if (strcmp(pnode->name, name) == 0) return 1;
-        pnode = pnode->next;
-    }
-    return 0;
-}
+typedef struct { char reg[64]; Type *type; } Val;
 
-static FuncSig* find_func_sig(const char *name) {
-    for (int i = 0; i < func_sig_cnt; i++) {
-        if (strcmp(func_sigs[i].name, name) == 0) return &func_sigs[i];
-    }
-    return NULL;
-}
+static Val emit_expr(Codegen *cg, Node *n);
+static void emit_stmt(Codegen *cg, Node *n);
+static void emit_func_def(Codegen *cg, Node *n);
+static void emit_global_var(Codegen *cg, Node *n);
 
-static void var_push_scope(void) {
-    scope_marks[scope_depth++] = var_cnt;
-}
+/* ================================================================ Expressions */
 
-static void var_pop_scope(void) {
-    if (scope_depth == 0) return;
-    var_cnt = scope_marks[--scope_depth];
-}
+/* Forward declarations for type helpers needed before emit_lvalue_addr */
+static int val_is_64bit(Val v);
+static int val_is_ptr(Val v);
+static int promote_to_i64(Codegen *cg, Val v, char *out_reg, size_t out_sz);
+static Type *default_int_type(void);
+static Type *default_i64_type(void);
+static Type *default_ptr_type(void);
+static Type *default_fp_type(void);
 
-static void var_add(const char *name, const char *ir, CType ty, int array_len, int struct_id, int is_global) {
-    if (var_cnt >= 512) error("變數表已滿");
-    strcpy(var_slots[var_cnt].name, name);
-    strcpy(var_slots[var_cnt].ir, ir);
-    var_slots[var_cnt].ty = ty;
-    var_slots[var_cnt].array_len = array_len;
-    var_slots[var_cnt].struct_id = struct_id;
-    var_slots[var_cnt].is_global = is_global;
-    var_cnt++;
-}
-
-static VarSlot* var_find(const char *name) {
-    for (int i = var_cnt - 1; i >= 0; i--) {
-        if (strcmp(var_slots[i].name, name) == 0) return &var_slots[i];
-    }
-    for (int i = global_cnt - 1; i >= 0; i--) {
-        if (strcmp(global_slots[i].name, name) == 0) return &global_slots[i];
-    }
-    error("找不到變數宣告");
-    return NULL;
-}
-
-static void global_add(const char *name, CType ty, int array_len, int struct_id) {
-    if (global_cnt >= 256) error("全域變數表已滿");
-    strcpy(global_slots[global_cnt].name, name);
-    strcpy(global_slots[global_cnt].ir, name);
-    global_slots[global_cnt].ty = ty;
-    global_slots[global_cnt].array_len = array_len;
-    global_slots[global_cnt].struct_id = struct_id;
-    global_slots[global_cnt].is_global = 1;
-    global_cnt++;
-}
-
-static const char* slot_prefix(VarSlot *slot) {
-    return slot->is_global ? "@" : "%";
-}
-
-static char* slot_ref(VarSlot *slot) {
-    char *res = malloc(64);
-    sprintf(res, "%s%s", slot_prefix(slot), slot->ir);
-    return res;
-}
-
-static int struct_size(int struct_id) {
-    if (struct_id < 0 || struct_id >= g_struct_def_cnt) error("struct id 錯誤");
-    return g_struct_defs[struct_id].size;
-}
-
-static int type_size(CType ty, int struct_id) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return 1;
-    if (ty == TY_SHORT || ty == TY_USHORT) return 2;
-    if (ty == TY_INT || ty == TY_UINT) return 4;
-    if (ty == TY_LONG || ty == TY_ULONG) return 8;
-    if (ty == TY_FLOAT) return 4;
-    if (ty == TY_DOUBLE) return 8;
-    if (ty == TY_INT_PTR || ty == TY_UINT_PTR || ty == TY_SHORT_PTR || ty == TY_USHORT_PTR ||
-        ty == TY_LONG_PTR || ty == TY_ULONG_PTR || ty == TY_CHAR_PTR || ty == TY_UCHAR_PTR ||
-        ty == TY_FLOAT_PTR || ty == TY_DOUBLE_PTR || ty == TY_STRUCT_PTR) return 8;
-    if (ty == TY_STRUCT) return struct_size(struct_id);
-    return 0;
-}
-
-static int elem_size(CType ptr_ty, int struct_id) {
-    if (!is_ptr(ptr_ty)) return 0;
-    return type_size(base_of(ptr_ty), struct_id);
-}
-
-static void build_func_sigs(ASTNode *funcs) {
-    func_sig_cnt = 0;
-    ASTNode *f = funcs;
-    while (f) {
-        if (f->type != AST_FUNC) { f = f->next; continue; }
-        if (func_sig_cnt >= 128) error("函式表已滿");
-        FuncSig *sig = &func_sigs[func_sig_cnt++];
-        strcpy(sig->name, f->name);
-        sig->ret = f->ty;
-        sig->ret_struct_id = f->struct_id;
-        sig->param_cnt = 0;
-        ASTNode *p = f->left;
-        while (p && sig->param_cnt < 16) {
-            sig->params[sig->param_cnt++] = p->ty;
-            sig->param_struct_id[sig->param_cnt - 1] = p->struct_id;
-            p = p->next;
-        }
-        f = f->next;
-    }
-}
-
-static int func_has_def(ASTNode *funcs, const char *name) {
-    ASTNode *f = funcs;
-    while (f) {
-        if (f->type != AST_FUNC) { f = f->next; continue; }
-        if (!f->is_decl && strcmp(f->name, name) == 0) return 1;
-        f = f->next;
-    }
-    return 0;
-}
-
-static int stmt_ends_with_return(ASTNode *node) {
-    if (!node) return 0;
-    if (node->type == AST_RETURN) return 1;
-    if (node->type == AST_BREAK || node->type == AST_CONTINUE) return 1;
-    if (node->type == AST_CASE) return stmt_list_ends_with_return(node->left);
-    if (node->type == AST_IF) {
-        int then_ret = stmt_list_ends_with_return(node->then_body);
-        int else_ret = stmt_list_ends_with_return(node->else_body);
-        return then_ret && else_ret;
-    }
-    return 0;
-}
-
-static int stmt_list_ends_with_return(ASTNode *node) {
-    if (!node) return 0;
-    ASTNode *cur = node;
-    while (cur->next) cur = cur->next;
-    return stmt_ends_with_return(cur);
-}
-
-static int stmt_may_fallthrough(ASTNode *node) {
-    if (!node) return 1;
-    if (node->type == AST_RETURN || node->type == AST_BREAK || node->type == AST_CONTINUE) return 0;
-    if (node->type == AST_CASE) return stmt_list_may_fallthrough(node->left);
-    if (node->type == AST_IF) {
-        int then_ft = stmt_list_may_fallthrough(node->then_body);
-        int else_ft = node->else_body ? stmt_list_may_fallthrough(node->else_body) : 1;
-        return then_ft || else_ft;
-    }
-    return 1;
-}
-
-static int stmt_list_may_fallthrough(ASTNode *node) {
-    if (!node) return 1;
-    ASTNode *cur = node;
-    while (cur->next) cur = cur->next;
-    return stmt_may_fallthrough(cur);
-}
-
-static ValueType vt_from_ctype(CType ty) {
-    if (ty == TY_CHAR || ty == TY_UCHAR) return VT_I8;
-    if (ty == TY_SHORT || ty == TY_USHORT) return VT_I16;
-    if (ty == TY_INT || ty == TY_UINT) return VT_I32;
-    if (ty == TY_LONG || ty == TY_ULONG) return VT_I64;
-    if (ty == TY_FLOAT) return VT_F32;
-    if (ty == TY_DOUBLE) return VT_F64;
-    if (is_ptr(ty)) return VT_PTR;
-    return VT_I32;
-}
-
-static const char* llvm_type_from_vt(ValueType vt) {
-    if (vt == VT_I1) return "i1";
-    if (vt == VT_I8) return "i8";
-    if (vt == VT_I16) return "i16";
-    if (vt == VT_I32) return "i32";
-    if (vt == VT_I64) return "i64";
-    if (vt == VT_F32) return "float";
-    if (vt == VT_F64) return "double";
-    return "ptr";
-}
-
-static Value value_from_raw(char *reg, ValueType vt, CType cty) {
-    Value v = {reg, vt, cty};
+static Val make_val(const char *reg, Type *type) {
+    Val v;
+    strncpy(v.reg, reg, 63); v.reg[63] = '\0';
+    v.type = type;
     return v;
 }
 
-static Value value_from_ctype(char *reg, CType ty) {
-    return value_from_raw(reg, vt_from_ctype(ty), ty);
+/* Compute the *address* of an lvalue node.
+   Returns ptr register string, or NULL if not lvalue. */
+static char *emit_lvalue_addr(Codegen *cg, Node *n) {
+    if (n->kind == ND_IDENT) {
+        Local *l = find_local(cg, n->sval);
+        if (l) return strdup(l->llvm_name);
+        Global *g = find_global(cg, n->sval);
+        if (g) {
+            char *buf = malloc(128);
+            snprintf(buf, 128, "@%s", n->sval);
+            return buf;
+        }
+        /* external / undeclared – treat as global */
+        char *buf = malloc(128);
+        snprintf(buf, 128, "@%s", n->sval);
+        return buf;
+    }
+    if (n->kind == ND_DEREF) {
+        Val v = emit_expr(cg, n->children[0]);
+        if (val_is_ptr(v)) return strdup(v.reg);
+        /* convert i64 to ptr */
+        int rp = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rp, v.reg);
+        char *buf = malloc(32); snprintf(buf, 32, "%%t%d", rp);
+        return buf;
+    }
+    if (n->kind == ND_INDEX) {
+        Val base_v = emit_expr(cg, n->children[0]);
+        Val idx_v  = emit_expr(cg, n->children[1]);
+        int r = new_reg(cg);
+        Type *elem = (n->children[0]->type && n->children[0]->type->base)
+                      ? n->children[0]->type->base : NULL;
+        /* Default to ptr element stride when type unknown — safer for pointer arrays */
+        const char *et = elem ? llvm_type(elem) : "ptr";
+        /* ensure base is ptr */
+        char base_r[64];
+        if (val_is_ptr(base_v)) { strncpy(base_r, base_v.reg, 63); base_r[63] = '\0'; }
+        else { int rp = new_reg(cg); __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rp, base_v.reg); snprintf(base_r, 64, "%%t%d", rp); }
+        /* ensure idx is i64 */
+        char idx_r[64]; promote_to_i64(cg, idx_v, idx_r, 64);
+        __c0c_emit(cg->out, "  %%t%d = getelementptr %s, ptr %s, i64 %s\n", r, et, base_r, idx_r);
+        char *buf = malloc(32);
+        snprintf(buf, 32, "%%t%d", r);
+        return buf;
+    }
+    if (n->kind == ND_MEMBER || n->kind == ND_ARROW) {
+        Val base_v;
+        if (n->kind == ND_ARROW) base_v = emit_expr(cg, n->children[0]);
+        else {
+            char *addr = emit_lvalue_addr(cg, n->children[0]);
+            if (addr) {
+                base_v = make_val(addr, default_ptr_type());
+                free(addr);
+            } else {
+                base_v = emit_expr(cg, n->children[0]);
+                if (!val_is_ptr(base_v)) {
+                    int rp = new_reg(cg);
+                    char promoted[64]; promote_to_i64(cg, base_v, promoted, 64);
+                    __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rp, promoted);
+                    char tmp[32]; snprintf(tmp, 32, "%%t%d", rp);
+                    base_v = make_val(tmp, default_ptr_type());
+                }
+            }
+        }
+        char *memname = n->sval;
+        Type *basety = n->children[0] ? n->children[0]->type : NULL;
+        long offset = 0;
+        if (basety && (basety->kind == TY_STRUCT || basety->kind == TY_UNION) && basety->params) {
+            for (int i = 0; i < basety->n_members; i++) {
+                if (basety->params[i].name && strcmp(basety->params[i].name, memname) == 0) {
+                    break;
+                }
+                if (basety->members && basety->members[i]) {
+                    offset += type_size(basety->members[i]);
+                }
+            }
+        }
+        {
+            int r = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = getelementptr i8, ptr %s, i64 %ld\n", r, base_v.reg, offset);
+            char *buf = malloc(32);
+            snprintf(buf, 32, "%%t%d", r);
+            return buf;
+        }
+    }
+    return NULL;
 }
 
-static Value cast_value(Value v, CType to) {
-    if (v.reg == NULL) error("使用了 void 表達式");
-    if (v.cty == to && v.vt != VT_I1) return v;
-    if (is_ptr(to)) {
-        if (v.vt == VT_PTR) {
-            v.cty = to;
+static Type *default_int_type(void) {
+    static Type t_int = { .kind = TY_INT, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+    return &t_int;
+}
+static Type *default_i64_type(void) {
+    static Type t_i64 = { .kind = TY_LONG, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+    return &t_i64;
+}
+static Type *default_ptr_type(void) {
+    static Type t_ptr = { .kind = TY_PTR, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+    return &t_ptr;
+}
+static Type *default_fp_type(void) {
+    static Type t_double = { .kind = TY_DOUBLE, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+    return &t_double;
+}
+/* Return the effective LLVM type for a Val — used to decide sext/truncation */
+static int val_is_64bit(Val v) {
+    if (!v.type) return 0;
+    switch (v.type->kind) {
+    case TY_LONG: case TY_ULONG: case TY_LONGLONG: case TY_ULONGLONG:
+    case TY_PTR:  case TY_ARRAY: case TY_DOUBLE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+static int val_is_ptr(Val v) {
+    if (!v.type) return 0;
+    return v.type->kind == TY_PTR || v.type->kind == TY_ARRAY;
+}
+
+/* Promote any value to i64 for arithmetic. Handles ptr, i64, i32. */
+static int promote_to_i64(Codegen *cg, Val v, char *out_reg, size_t out_sz) {
+    if (val_is_ptr(v)) {
+        int r = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = ptrtoint ptr %s to i64\n", r, v.reg);
+        snprintf(out_reg, out_sz, "%%t%d", r);
+        return r;
+    } else if (val_is_64bit(v)) {
+        strncpy(out_reg, v.reg, out_sz - 1); out_reg[out_sz-1] = '\0';
+        return -1;
+    } else {
+        int r = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = sext i32 %s to i64\n", r, v.reg);
+        snprintf(out_reg, out_sz, "%%t%d", r);
+        return r;
+    }
+}
+
+/* Emit a truthiness check: returns register number of i1 result */
+static int emit_cond(Codegen *cg, Val cv) {
+    int r = new_reg(cg);
+    if (val_is_ptr(cv)) {
+        __c0c_emit(cg->out, "  %%t%d = icmp ne ptr %s, null\n", r, cv.reg);
+    } else if (type_is_fp(cv.type)) {
+        __c0c_emit(cg->out, "  %%t%d = fcmp one double %s, 0.0\n", r, cv.reg);
+    } else {
+        char promoted[64];
+        promote_to_i64(cg, cv, promoted, 64);
+        __c0c_emit(cg->out, "  %%t%d = icmp ne i64 %s, 0\n", r, promoted);
+    }
+    return r;
+}
+
+static Val emit_expr(Codegen *cg, Node *n) {
+    if (!n) return make_val("0", default_int_type());
+    int line = n->line;
+    (void)line;
+
+    switch (n->kind) {
+
+    case ND_INT_LIT: {
+        char buf[32];
+        snprintf(buf, sizeof buf, "%lld", n->ival);
+        return make_val(buf, default_int_type());
+    }
+
+    case ND_FLOAT_LIT: {
+        /* LLVM needs hex float for precise representation */
+        int r = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = fadd double 0.0, %g\n", r, n->fval);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        static Type t_double = { .kind = TY_DOUBLE, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+        return make_val(buf, &t_double);
+    }
+
+    case ND_CHAR_LIT: {
+        char buf[32];
+        snprintf(buf, sizeof buf, "%lld", n->ival);
+        static Type t_char = { .kind = TY_CHAR, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+        return make_val(buf, &t_char);
+    }
+
+    case ND_STRING_LIT: {
+        int sid = intern_string(cg, n->sval);
+        int r   = new_reg(cg);
+        int slen = str_literal_len(n->sval);
+        __c0c_emit(cg->out, "  %%t%d = getelementptr [%d x i8], ptr @.str%d, i64 0, i64 0\n",
+             r, slen, sid);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        return make_val(buf, default_ptr_type());
+    }
+
+    case ND_IDENT: {
+        Local *l = find_local(cg, n->sval);
+        if (l) {
+            if (l->is_param) return make_val(l->llvm_name, l->type);
+            int r = new_reg(cg);
+            /* Determine actual load type: we store i64 for ints, ptr for pointers */
+            const char *load_t;
+            Type *ret_t;
+            if (l->type && (l->type->kind == TY_PTR || l->type->kind == TY_ARRAY)) {
+                load_t = "ptr"; ret_t = default_ptr_type();
+            } else if (l->type && type_is_fp(l->type)) {
+                load_t = llvm_type(l->type); ret_t = l->type;
+            } else {
+                load_t = "i64";
+                /* Preserve original C type (TY_INT, TY_CHAR etc.) so varargs
+                   truncation works correctly for printf("%d", int_var) */
+                ret_t = (l->type) ? l->type : default_i64_type();
+            }
+            __c0c_emit(cg->out, "  %%t%d = load %s, ptr %s\n", r, load_t, l->llvm_name);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+            return make_val(buf, ret_t);
+        }
+        Global *g = find_global(cg, n->sval);
+        if (g && g->type && g->type->kind != TY_FUNC) {
+            int r = new_reg(cg);
+            const char *load_t;
+            Type *ret_t;
+            if (g->type->kind == TY_PTR || g->type->kind == TY_ARRAY) {
+                load_t = "ptr"; ret_t = default_ptr_type();
+            } else if (type_is_fp(g->type)) {
+                load_t = llvm_type(g->type); ret_t = g->type;
+            } else {
+                load_t = "i64"; ret_t = g->type ? g->type : default_i64_type();
+            }
+            __c0c_emit(cg->out, "  %%t%d = load %s, ptr @%s\n", r, load_t, n->sval);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+            return make_val(buf, ret_t);
+        }
+        /* function or undeclared: return pointer to global */
+        char buf[128]; snprintf(buf, sizeof buf, "@%s", n->sval);
+        return make_val(buf, default_ptr_type());
+    }
+
+    case ND_CALL: {
+        /* children[0] = callee, children[1..] = args */
+        Node *callee = n->children[0];
+        /* Try to determine return type */
+        Type *ret_type = default_int_type();
+
+        /* Collect args */
+        char **arg_regs  = malloc(n->n_children * 8);
+        Type **arg_types = malloc(n->n_children * 8);
+        for (int i = 1; i < n->n_children; i++) {
+            Val av = emit_expr(cg, n->children[i]);
+            arg_regs[i]  = strdup(av.reg);
+            arg_types[i] = av.type;
+        }
+
+        /* get callee */
+        char callee_buf[128] = {0};
+        if (callee->kind == ND_IDENT) {
+            snprintf(callee_buf, sizeof callee_buf, "@%s", callee->sval);
+            Global *g = find_global(cg, callee->sval);
+            if (g && g->type && g->type->kind == TY_FUNC)
+                ret_type = g->type->ret;
+            /* well-known libc functions that return ptr */
+            else {
+                const char *ptr_funcs[] = {
+                    "malloc","calloc","realloc","strdup","strndup",
+                    "memcpy","memmove","memset","strcpy","strncpy",
+                    "strcat","strncat","strchr","strrchr","strstr",
+                    "fopen","fdopen","freopen","tmpfile",
+                    "getenv","setlocale","strtok","strerror",
+                    "node_new","type_new","type_ptr","type_array",
+                    "parser_new","lexer_new","codegen_new",
+                    "macro_preprocess","read_file",
+                    "__c0c_stderr","__c0c_stdout","__c0c_stdin",
+                    "__c0c_get_tbuf","__c0c_get_td_name",
+                    NULL
+                };
+                for (int pi = 0; ptr_funcs[pi]; pi++) {
+                    if (strcmp(callee->sval, ptr_funcs[pi]) == 0) {
+                        ret_type = default_ptr_type();
+                        break;
+                    }
+                }
+                /* functions returning i64 */
+                const char *i64_funcs[] = {
+                    "strlen","strtol","strtoll","atol","atoll",
+                    "ftell","fread","fwrite","fseek",
+                    "__c0c_get_td_kind",
+                    NULL
+                };
+                for (int pi = 0; i64_funcs[pi]; pi++) {
+                    if (strcmp(callee->sval, i64_funcs[pi]) == 0) {
+                        ret_type = default_i64_type();
+                        break;
+                    }
+                }
+                /* functions returning void */
+                static Type t_void = { .kind = TY_VOID, .is_const = 0, .is_volatile = 0, .base = NULL, .array_size = -1, .ret = NULL, .params = NULL, .param_count = 0, .variadic = 0, .tag = NULL, .members = NULL, .n_members = 0, .name = NULL };
+                const char *void_funcs[] = {
+                    "__c0c_va_start","__c0c_va_end","__c0c_va_copy",
+                    "__c0c_emit",
+                    "free","exit","perror","assert",
+                    NULL
+                };
+                for (int pi = 0; void_funcs[pi]; pi++) {
+                    if (strcmp(callee->sval, void_funcs[pi]) == 0) {
+                        ret_type = &t_void;
+                        break;
+                    }
+                }
+            }
+        } else {
+            Val cv = emit_expr(cg, callee);
+            strncpy(callee_buf, cv.reg, sizeof callee_buf - 1);
+        }
+
+        /* Is this a varargs function? printf/fprintf/sprintf/snprintf need i32 for int args */
+        int is_varargs_call = 0;
+        if (callee->kind == ND_IDENT) {
+            const char *va_funcs[] = {
+                "printf","fprintf","sprintf","snprintf","dprintf",
+                "vprintf","vfprintf","vsprintf","vsnprintf",
+                "__c0c_emit",
+                NULL
+            };
+            for (int pi = 0; va_funcs[pi]; pi++)
+                if (strcmp(callee->sval, va_funcs[pi]) == 0) { is_varargs_call = 1; break; }
+        }
+
+        /* For varargs calls on arm64/x86-64, integer args are passed as 64-bit.
+           Do NOT truncate to i32 — keep all integers as i64 for varargs.
+           The format string (%d vs %lld) is handled by printf internally. */
+
+        int r = new_reg(cg);
+        const char *rt = llvm_type(ret_type);
+        int is_void = (ret_type->kind == TY_VOID);
+
+        if (is_void && is_varargs_call)
+            __c0c_emit(cg->out, "  call void (ptr, ...) %s(", callee_buf);
+        else if (is_void)
+            __c0c_emit(cg->out, "  call void %s(", callee_buf);
+        else if (is_varargs_call)
+            __c0c_emit(cg->out, "  %%t%d = call %s (ptr, ...) %s(", r, rt, callee_buf);
+        else
+            __c0c_emit(cg->out, "  %%t%d = call %s %s(", r, rt, callee_buf);
+
+        for (int i = 1; i < n->n_children; i++) {
+            if (i > 1) __c0c_emit(cg->out, ", ");
+            const char *at;
+            if (arg_types[i] && (arg_types[i]->kind == TY_PTR || arg_types[i]->kind == TY_ARRAY))
+                at = "ptr";
+            else if (arg_types[i] && type_is_fp(arg_types[i]))
+                at = llvm_type(arg_types[i]);
+            else
+                at = "i64";  /* all integers as i64 — arm64 varargs promotes to 64-bit */
+            __c0c_emit(cg->out, "%s %s", at, arg_regs[i]);
+        }
+        __c0c_emit(cg->out, ")\n");
+
+        for (int i = 1; i < n->n_children; i++) free(arg_regs[i]);
+        free(arg_regs); free(arg_types);
+
+        if (is_void) return make_val("0", ret_type);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+
+        /* Normalize return: if call emits i32/i8/etc but we want i64, add sext.
+           Only sext if: not ptr, not fp, not void, and actual emitted type is < 64 bits */
+        Type *val_ret = ret_type;
+        if (!type_is_fp(ret_type) && ret_type->kind != TY_PTR &&
+            ret_type->kind != TY_ARRAY && ret_type->kind != TY_VOID) {
+            int ret_sz = type_size(ret_type);
+            /* Only sext if the emitted type is actually < i64
+               (ret_sz == 0 means struct/unknown -> already emitted as i64) */
+            if (ret_sz > 0 && ret_sz < 8 && strcmp(rt, "i64") != 0) {
+                int rs = new_reg(cg);
+                __c0c_emit(cg->out, "  %%t%d = sext %s %%t%d to i64\n", rs, rt, r);
+                snprintf(buf, sizeof buf, "%%t%d", rs);
+            }
+            val_ret = default_i64_type();
+        }
+        return make_val(buf, val_ret);
+    }
+
+    case ND_BINOP: {
+        /* Short-circuit operators must be handled before evaluating both operands */
+        if (n->op == TOK_AND) {
+            Val lv = emit_expr(cg, n->children[0]);
+            int lTrue = new_label(cg), lFalse = new_label(cg), lEnd = new_label(cg);
+            char la[64]; promote_to_i64(cg, lv, la, 64);
+            int rA = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = icmp ne i64 %s, 0\n", rA, la);
+            __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rA, lTrue, lFalse);
+            __c0c_emit(cg->out, "L%d:\n", lTrue);
+            Val rv = emit_expr(cg, n->children[1]);
+            char lb[64]; promote_to_i64(cg, rv, lb, 64);
+            int rB = new_reg(cg), rBext = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = icmp ne i64 %s, 0\n", rB, lb);
+            __c0c_emit(cg->out, "  %%t%d = zext i1 %%t%d to i64\n", rBext, rB);
+            __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+            __c0c_emit(cg->out, "L%d:\n", lFalse);
+            __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+            __c0c_emit(cg->out, "L%d:\n", lEnd);
+            int rZ = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = phi i64 [ %%t%d, %%L%d ], [ 0, %%L%d ]\n",
+                       rZ, rBext, lTrue, lFalse);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", rZ);
+            return make_val(buf, default_i64_type());
+        }
+        if (n->op == TOK_OR) {
+            Val lv = emit_expr(cg, n->children[0]);
+            int lTrue = new_label(cg), lFalse = new_label(cg), lEnd = new_label(cg);
+            char la[64]; promote_to_i64(cg, lv, la, 64);
+            int rA = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = icmp ne i64 %s, 0\n", rA, la);
+            __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rA, lTrue, lFalse);
+            __c0c_emit(cg->out, "L%d:\n", lTrue);
+            __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+            __c0c_emit(cg->out, "L%d:\n", lFalse);
+            Val rv = emit_expr(cg, n->children[1]);
+            char lb[64]; promote_to_i64(cg, rv, lb, 64);
+            int rB = new_reg(cg), rBext = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = icmp ne i64 %s, 0\n", rB, lb);
+            __c0c_emit(cg->out, "  %%t%d = zext i1 %%t%d to i64\n", rBext, rB);
+            __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+            __c0c_emit(cg->out, "L%d:\n", lEnd);
+            int rZ = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = phi i64 [ 1, %%L%d ], [ %%t%d, %%L%d ]\n",
+                       rZ, lTrue, rBext, lFalse);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", rZ);
+            return make_val(buf, default_i64_type());
+        }
+
+        Val lv = emit_expr(cg, n->children[0]);
+        Val rv = emit_expr(cg, n->children[1]);
+        int r  = new_reg(cg);
+        int fp = type_is_fp(lv.type) || type_is_fp(rv.type);
+        int is_ptr = val_is_ptr(lv);
+        const char *lt = fp ? llvm_type(lv.type) : "i64";
+
+        /* For pointer arithmetic: convert ptrs to i64 first, then do arithmetic */
+        char lreg[64], rreg[64];
+        lreg[0] = '\0'; rreg[0] = '\0';
+        int is_cmp = 0;
+        switch (n->op) {
+        case TOK_EQ: case TOK_NEQ:
+        case TOK_LT: case TOK_GT: case TOK_LEQ: case TOK_GEQ:
+            is_cmp = 1; break;
+        default: break;
+        }
+        if (!fp) {
+            promote_to_i64(cg, lv, lreg, 64);
+            promote_to_i64(cg, rv, rreg, 64);
+            lt = "i64";
+        } else {
+            strncpy(lreg, lv.reg, 63); lreg[63] = '\0';
+            /* For fp comparison with integer, need to convert int to double */
+            if (is_cmp && rv.type && !type_is_fp(rv.type)) {
+                int rconv = new_reg(cg);
+                __c0c_emit(cg->out, "  %%t%d = sitofp i64 %s to double\n", rconv, rv.reg);
+                snprintf(rreg, 64, "%%t%d", rconv);
+            } else {
+                strncpy(rreg, rv.reg, 63); rreg[63] = '\0';
+            }
+        }
+
+        const char *op = NULL;
+        switch (n->op) {
+        case TOK_PLUS:    op = fp ? "fadd" : (is_ptr ? "getelementptr" : "add");  break;
+        case TOK_MINUS:   op = fp ? "fsub" : "sub";   break;
+        case TOK_STAR:    op = fp ? "fmul" : "mul";   break;
+        case TOK_SLASH:   op = fp ? "fdiv" : "sdiv";  break;
+        case TOK_PERCENT: op = fp ? "frem" : "srem";  break;
+        case TOK_AMP:     op = "and"; break;
+        case TOK_PIPE:    op = "or";  break;
+        case TOK_CARET:   op = "xor"; break;
+        case TOK_LSHIFT:  op = "shl"; break;
+        case TOK_RSHIFT:  op = "ashr"; break;
+        case TOK_EQ:   op = fp ? "fcmp oeq" : "icmp eq";  is_cmp = 1; break;
+        case TOK_NEQ:  op = fp ? "fcmp one" : "icmp ne";  is_cmp = 1; break;
+        case TOK_LT:   op = fp ? "fcmp olt" : "icmp slt"; is_cmp = 1; break;
+        case TOK_GT:   op = fp ? "fcmp ogt" : "icmp sgt"; is_cmp = 1; break;
+        case TOK_LEQ:  op = fp ? "fcmp ole" : "icmp sle"; is_cmp = 1; break;
+        case TOK_GEQ:  op = fp ? "fcmp oge" : "icmp sge"; is_cmp = 1; break;
+        case TOK_AND: case TOK_OR:
+            /* handled above with short-circuit; should not reach here */
+            op = "add"; break;
+        default:
+            op = "add"; /* fallback */
+        }
+
+        if (n->op == TOK_PLUS && is_ptr) {
+            /* ptr + int: convert i64 back to ptr for GEP */
+            int rptr = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rptr, lreg);
+            __c0c_emit(cg->out, "  %%t%d = getelementptr i8, ptr %%t%d, i64 %s\n", r, rptr, rreg);
+        } else if (is_cmp) {
+            __c0c_emit(cg->out, "  %%t%d = %s %s %s, %s\n", r, op, lt, lreg, rreg);
+            /* fcmp already returns i1, just zext to i64 */
+            int rZ = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = zext i1 %%t%d to i64\n", rZ, r);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", rZ);
+            return make_val(buf, default_i64_type());
+        } else {
+            __c0c_emit(cg->out, "  %%t%d = %s %s %s, %s\n", r, op, lt, lreg, rreg);
+        }
+
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        /* ptr+int returns ptr (GEP result), ptr arithmetic returns i64, everything else i64 */
+        if (n->op == TOK_PLUS && is_ptr)
+            return make_val(buf, default_ptr_type());
+        if (is_ptr)  /* ptr - ptr, ptr * int etc: all i64 */
+            return make_val(buf, default_i64_type());
+        if (fp)
+            return make_val(buf, default_fp_type());
+        return make_val(buf, default_i64_type());
+    }
+
+    case ND_UNOP: {
+        Val v = emit_expr(cg, n->children[0]);
+        int r = new_reg(cg);
+        int fp = type_is_fp(v.type);
+        char vp[64];
+        if (!fp) promote_to_i64(cg, v, vp, 64);
+        switch (n->op) {
+        case TOK_MINUS:
+            if (fp) __c0c_emit(cg->out, "  %%t%d = fneg double %s\n", r, v.reg);
+            else    __c0c_emit(cg->out, "  %%t%d = sub i64 0, %s\n", r, vp);
+            break;
+        case TOK_BANG: {
+            int rc = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = icmp eq i64 %s, 0\n", rc, vp);
+            __c0c_emit(cg->out, "  %%t%d = zext i1 %%t%d to i64\n", r, rc);
+            break;
+        }
+        case TOK_TILDE:
+            __c0c_emit(cg->out, "  %%t%d = xor i64 %s, -1\n", r, vp);
+            break;
+        case TOK_PLUS:
             return v;
+        default:
+            __c0c_emit(cg->out, "  %%t%d = add i64 %s, 0\n", r, vp);
         }
-        error("不支援轉換為指標");
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        return make_val(buf, fp ? v.type : default_i64_type());
     }
-    ValueType from_vt = v.vt;
-    ValueType to_vt = vt_from_ctype(to);
-    int r = reg_cnt++;
-    if (to_vt == VT_F32 || to_vt == VT_F64) {
-        const char *to_ty = (to_vt == VT_F64) ? "double" : "float";
-        if (from_vt == VT_F32 || from_vt == VT_F64) {
-            const char *op = (to_vt == VT_F64 && from_vt == VT_F32) ? "fpext" : "fptrunc";
-            fprintf(out_fp, "  %%%d = %s %s %s to %s\n", r, op,
-                    (from_vt == VT_F64) ? "double" : "float", v.reg, to_ty);
-        } else {
-            const char *op = is_unsigned(v.cty) ? "uitofp" : "sitofp";
-            fprintf(out_fp, "  %%%d = %s %s %s to %s\n", r, op, llvm_type_from_vt(from_vt), v.reg, to_ty);
+
+    case ND_ASSIGN: {
+        Val rv_val = emit_expr(cg, n->children[1]);
+        char *addr = emit_lvalue_addr(cg, n->children[0]);
+        if (addr) {
+            /* Use the actual LLVM type of the value, not the C type */
+            const char *st;
+            if (val_is_ptr(rv_val))       st = "ptr";
+            else if (type_is_fp(rv_val.type)) st = llvm_type(rv_val.type);
+            else                           st = "i64";
+            /* If value might be i32, promote first */
+            char stored[64];
+            if (!val_is_ptr(rv_val) && !val_is_64bit(rv_val) && !type_is_fp(rv_val.type)) {
+                int rp = new_reg(cg);
+                __c0c_emit(cg->out, "  %%t%d = sext i32 %s to i64\n", rp, rv_val.reg);
+                snprintf(stored, 64, "%%t%d", rp);
+            } else {
+                strncpy(stored, rv_val.reg, 63); stored[63] = '\0';
+            }
+            __c0c_emit(cg->out, "  store %s %s, ptr %s\n", st, stored, addr);
+            free(addr);
         }
+        return rv_val;
+    }
+
+    case ND_COMPOUND_ASSIGN: {
+        /* e.g.  x += y  =>  x = x op y */
+        Val lv_val = emit_expr(cg, n->children[0]);
+        Val rv_val = emit_expr(cg, n->children[1]);
+        int r      = new_reg(cg);
+        int fp     = type_is_fp(lv_val.type) || type_is_fp(rv_val.type);
+        const char *it = fp ? "double" : "i64";
+        char lr[64], rr[64];
+        if (!fp) {
+            promote_to_i64(cg, lv_val, lr, 64);
+            promote_to_i64(cg, rv_val, rr, 64);
+        } else {
+            strncpy(lr, lv_val.reg, 63); lr[63] = '\0';
+            strncpy(rr, rv_val.reg, 63); rr[63] = '\0';
+        }
+        const char *op2;
+        switch (n->op) {
+        case TOK_PLUS_ASSIGN:   op2 = fp ? "fadd" : "add";  break;
+        case TOK_MINUS_ASSIGN:  op2 = fp ? "fsub" : "sub";  break;
+        case TOK_STAR_ASSIGN:   op2 = fp ? "fmul" : "mul";  break;
+        case TOK_SLASH_ASSIGN:  op2 = fp ? "fdiv" : "sdiv"; break;
+        case TOK_PERCENT_ASSIGN:op2 = "srem"; break;
+        case TOK_AMP_ASSIGN:    op2 = "and";  break;
+        case TOK_PIPE_ASSIGN:   op2 = "or";   break;
+        case TOK_CARET_ASSIGN:  op2 = "xor";  break;
+        case TOK_LSHIFT_ASSIGN: op2 = "shl";  break;
+        case TOK_RSHIFT_ASSIGN: op2 = "ashr"; break;
+        default: op2 = "add";
+        }
+        __c0c_emit(cg->out, "  %%t%d = %s %s %s, %s\n", r, op2, it, lr, rr);
+
+        char *addr = emit_lvalue_addr(cg, n->children[0]);
+        if (addr) {
+            __c0c_emit(cg->out, "  store %s %%t%d, ptr %s\n", it, r, addr);
+            free(addr);
+        }
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        return make_val(buf, fp ? lv_val.type : default_i64_type());
+    }
+
+    case ND_PRE_INC:
+    case ND_PRE_DEC: {
+        Val v = emit_expr(cg, n->children[0]);
+        int r = new_reg(cg);
+        const char *op3 = (n->kind == ND_PRE_INC) ? "add" : "sub";
+        char vr[64];
+        promote_to_i64(cg, v, vr, 64);
+        __c0c_emit(cg->out, "  %%t%d = %s i64 %s, 1\n", r, op3, vr);
+        char *addr = emit_lvalue_addr(cg, n->children[0]);
+        if (addr) { __c0c_emit(cg->out, "  store i64 %%t%d, ptr %s\n", r, addr); free(addr); }
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        return make_val(buf, default_i64_type());
+    }
+
+    case ND_POST_INC:
+    case ND_POST_DEC: {
+        Val v = emit_expr(cg, n->children[0]);
+        int r = new_reg(cg);
+        const char *op4 = (n->kind == ND_POST_INC) ? "add" : "sub";
+        char vr[64];
+        promote_to_i64(cg, v, vr, 64);
+        __c0c_emit(cg->out, "  %%t%d = %s i64 %s, 1\n", r, op4, vr);
+        char *addr = emit_lvalue_addr(cg, n->children[0]);
+        if (addr) { __c0c_emit(cg->out, "  store i64 %%t%d, ptr %s\n", r, addr); free(addr); }
+        return v; /* return old value */
+    }
+
+    case ND_ADDR: {
+        char *addr = emit_lvalue_addr(cg, n->children[0]);
+        if (!addr) return make_val("null", default_ptr_type());
+        Val v = make_val(addr, default_ptr_type());
+        free(addr);
+        return v;
+    }
+
+    case ND_DEREF: {
+        Val pv = emit_expr(cg, n->children[0]);
+        int r  = new_reg(cg);
+        /* Ensure we have a ptr to load from */
+        char ptr_r[64];
+        if (val_is_ptr(pv)) {
+            strncpy(ptr_r, pv.reg, 63); ptr_r[63] = '\0';
+        } else {
+            int rp = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rp, pv.reg);
+            snprintf(ptr_r, 64, "%%t%d", rp);
+        }
+        /* Load: use ptr type for pointer targets, i64 for everything else */
+        Type *base = (pv.type && pv.type->base) ? pv.type->base : default_int_type();
+        int base_is_ptr = (base->kind == TY_PTR || base->kind == TY_ARRAY);
+        const char *load_t = base_is_ptr ? "ptr" : "i64";
+        Type *ret_t = base_is_ptr ? default_ptr_type() : default_i64_type();
+        __c0c_emit(cg->out, "  %%t%d = load %s, ptr %s\n", r, load_t, ptr_r);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        return make_val(buf, ret_t);
+    }
+
+    case ND_INDEX: {
+        Val base_v = emit_expr(cg, n->children[0]);
+        Val idx_v  = emit_expr(cg, n->children[1]);
+        /* Element type: use base's element type if known.
+           If base is a ptr with unknown base, default to ptr (8-byte stride)
+           rather than i32 (4-byte stride) — safer for pointer arrays. */
+        Type *elem = (base_v.type && base_v.type->base) ? base_v.type->base : NULL;
+        /* Determine GEP element type and load type */
+        int elem_is_ptr = (elem && (elem->kind == TY_PTR || elem->kind == TY_ARRAY));
+        int elem_is_fp  = (elem && type_is_fp(elem));
+        const char *gep_et;
+        const char *load_t;
+        Type *ret_elem;
+        if (!elem) {
+            /* Unknown element type — use ptr stride (safer for pointer arrays) */
+            gep_et = "ptr"; load_t = "ptr"; ret_elem = default_ptr_type();
+        } else if (elem_is_ptr) {
+            gep_et = "ptr"; load_t = "ptr"; ret_elem = default_ptr_type();
+        } else if (elem_is_fp) {
+            gep_et = llvm_type(elem); load_t = llvm_type(elem); ret_elem = elem;
+        } else {
+            gep_et = "i64"; load_t = "i64"; ret_elem = default_i64_type();
+        }
+        /* Ensure base is ptr and index is i64 */
+        char base_r[64], idx_r[64];
+        if (val_is_ptr(base_v)) strncpy(base_r, base_v.reg, 63);
+        else { int rb = new_reg(cg); __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rb, base_v.reg); snprintf(base_r, 64, "%%t%d", rb); }
+        promote_to_i64(cg, idx_v, idx_r, 64);
+        base_r[63] = '\0';
+        int rG = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = getelementptr %s, ptr %s, i64 %s\n",
+             rG, gep_et, base_r, idx_r);
+        int rL = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = load %s, ptr %%t%d\n", rL, load_t, rG);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", rL);
+        return make_val(buf, ret_elem);
+    }
+
+    case ND_CAST: {
+        Val v  = emit_expr(cg, n->cast_expr);
+        Type *dst = n->cast_type;
+        if (!dst) return v;
+        int r  = new_reg(cg);
+        int fp_src = type_is_fp(v.type);
+        int fp_dst = type_is_fp(dst);
+        int is_dst_ptr = (dst->kind == TY_PTR || dst->kind == TY_ARRAY);
+        int is_src_ptr = val_is_ptr(v);
+        if (fp_src && fp_dst) {
+            int sz_src = type_size(v.type); int sz_dst = type_size(dst);
+            if (sz_dst > sz_src) __c0c_emit(cg->out, "  %%t%d = fpext float %s to double\n", r, v.reg);
+            else __c0c_emit(cg->out, "  %%t%d = fptrunc double %s to float\n", r, v.reg);
+        } else if (fp_src && !fp_dst) {
+            __c0c_emit(cg->out, "  %%t%d = fptosi double %s to i64\n", r, v.reg);
+        } else if (!fp_src && fp_dst) {
+            char promoted[64]; promote_to_i64(cg, v, promoted, 64);
+            __c0c_emit(cg->out, "  %%t%d = sitofp i64 %s to %s\n", r, promoted, llvm_type(dst));
+        } else if (is_dst_ptr && !is_src_ptr) {
+            /* int -> ptr */
+            char promoted[64]; promote_to_i64(cg, v, promoted, 64);
+            __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", r, promoted);
+        } else if (!is_dst_ptr && is_src_ptr) {
+            /* ptr -> int */
+            __c0c_emit(cg->out, "  %%t%d = ptrtoint ptr %s to i64\n", r, v.reg);
+        } else if (is_dst_ptr && is_src_ptr) {
+            /* ptr -> ptr: no-op */
+            __c0c_emit(cg->out, "  %%t%d = bitcast ptr %s to ptr\n", r, v.reg);
+        } else {
+            /* int -> int: use i64 throughout */
+            char promoted[64]; promote_to_i64(cg, v, promoted, 64);
+            __c0c_emit(cg->out, "  %%t%d = add i64 %s, 0\n", r, promoted);  /* no-op promote */
+        }
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r);
+        if (is_dst_ptr) return make_val(buf, default_ptr_type());
+        if (fp_dst)     return make_val(buf, dst);
+        return make_val(buf, default_i64_type());
+    }
+
+    case ND_TERNARY: {
+        Val cv     = emit_expr(cg, n->cond);
+        int lT     = new_label(cg);
+        int lF     = new_label(cg);
+        int lEnd   = new_label(cg);
+        int rcond = emit_cond(cg, cv);
+        __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rcond, lT, lF);
+        __c0c_emit(cg->out, "L%d:\n", lT);
+        Val tv = emit_expr(cg, n->children[0]);
+        char tv_r[64]; promote_to_i64(cg, tv, tv_r, 64);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+        __c0c_emit(cg->out, "L%d:\n", lF);
+        Val fv = emit_expr(cg, n->children[1]);
+        char fv_r[64]; promote_to_i64(cg, fv, fv_r, 64);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+        int rp = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = phi i64 [ %s, %%L%d ], [ %s, %%L%d ]\n",
+             rp, tv_r, lT, fv_r, lF);
+        char buf[32]; snprintf(buf, sizeof buf, "%%t%d", rp);
+        return make_val(buf, default_i64_type());
+    }
+
+    case ND_SIZEOF_TYPE: {
+        int sz = n->cast_type ? type_size(n->cast_type) : 0;
+        char buf[32]; snprintf(buf, sizeof buf, "%d", sz);
+        return make_val(buf, default_int_type());
+    }
+
+    case ND_SIZEOF_EXPR: {
+        int sz = n->children[0]->type ? type_size(n->children[0]->type) : 8;
+        char buf[32]; snprintf(buf, sizeof buf, "%d", sz);
+        return make_val(buf, default_int_type());
+    }
+
+    case ND_COMMA: {
+        Val v = make_val("0", default_int_type());
+        for (int i = 0; i < n->n_children; i++)
+            v = emit_expr(cg, n->children[i]);
+        return v;
+    }
+
+    case ND_MEMBER:
+    case ND_ARROW: {
+        Val bv;
+        if (n->kind == ND_ARROW) {
+            bv = emit_expr(cg, n->children[0]);
+        } else {
+            char *a = emit_lvalue_addr(cg, n->children[0]);
+            if (a) {
+                bv = make_val(a, default_ptr_type());
+                free(a);
+            } else {
+                bv = emit_expr(cg, n->children[0]);
+            }
+        }
+        char base_ptr[64];
+        if (val_is_ptr(bv)) {
+            strncpy(base_ptr, bv.reg, 63); base_ptr[63] = '\0';
+        } else {
+            int rp = new_reg(cg);
+            char promoted[64]; promote_to_i64(cg, bv, promoted, 64);
+            __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rp, promoted);
+            snprintf(base_ptr, 64, "%%t%d", rp);
+        }
+        char *memname = n->sval;
+        Type *basety = n->children[0] ? n->children[0]->type : NULL;
+        long offset = 0;
+        if (basety && (basety->kind == TY_STRUCT || basety->kind == TY_UNION) && basety->params) {
+            for (int i = 0; i < basety->n_members; i++) {
+                if (basety->params[i].name && strcmp(basety->params[i].name, memname) == 0) {
+                    break;
+                }
+                if (basety->members && basety->members[i]) {
+                    offset += type_size(basety->members[i]);
+                }
+            }
+        }
+        {
+            int r = new_reg(cg);
+            if (offset > 0) {
+                __c0c_emit(cg->out, "  %%t%d = getelementptr i8, ptr %s, i64 %ld\n", r, base_ptr, offset);
+            } else {
+                __c0c_emit(cg->out, "  %%t%d = getelementptr i8, ptr %s, i64 0\n", r, base_ptr);
+            }
+            int r2 = new_reg(cg);
+            __c0c_emit(cg->out, "  %%t%d = load i64, ptr %%t%d\n", r2, r);
+            char buf[32]; snprintf(buf, sizeof buf, "%%t%d", r2);
+            return make_val(buf, default_i64_type());
+        }
+    }
+
+    default:
+        __c0c_emit(cg->out, "  ; unhandled expr node %d\n", n->kind);
+        return make_val("0", default_int_type());
+    }
+}
+
+/* ================================================================ Statements */
+
+static void emit_stmt(Codegen *cg, Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+
+    case ND_BLOCK:
+        if (n->ival) scope_push(cg);  /* ival=1 means explicit { } block */
+        for (int i = 0; i < n->n_children; i++)
+            emit_stmt(cg, n->children[i]);
+        if (n->ival) scope_pop(cg);
+        break;
+
+    case ND_VAR_DECL: {
+        Type *vt = n->var_type ? n->var_type : default_int_type();
+        const char *lt;
+        Type *stored_vt;
+        if (vt->kind == TY_ARRAY && vt->base && (vt->base->kind == TY_STRUCT || vt->base->kind == TY_UNION)) {
+            int elem_sz = type_size(vt->base);
+            int total_sz = (int)vt->array_size * elem_sz;
+            if (total_sz <= 0) total_sz = 8;
+            char size_buf[32];
+            snprintf(size_buf, sizeof(size_buf), "[%d x i8]", total_sz);
+            lt = size_buf;
+            stored_vt = default_ptr_type();
+        } else if (vt->kind == TY_STRUCT || vt->kind == TY_UNION) {
+            int sz = type_size(vt);
+            if (sz <= 0) sz = 8;
+            char size_buf[32];
+            snprintf(size_buf, sizeof(size_buf), "[%d x i8]", sz);
+            lt = size_buf;
+            stored_vt = vt;
+        } else if (vt->kind == TY_PTR || vt->kind == TY_ARRAY) {
+            lt = "ptr"; stored_vt = default_ptr_type();
+        } else if (type_is_fp(vt)) {
+            lt = "double"; stored_vt = default_fp_type();
+        } else {
+            lt = "i64"; stored_vt = vt;
+        }
+        int r = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = alloca %s\n", r, lt);
+        if (cg->n_locals >= MAX_LOCALS) { fprintf(stderr, "c0c: too many locals\n"); exit(1); }
+        Local *l = &cg->locals[cg->n_locals++];
+        l->name      = strdup(n->var_name ? n->var_name : "__anon");
+        l->llvm_name = malloc(32);
+        snprintf(l->llvm_name, 32, "%%t%d", r);
+        l->type      = stored_vt;
+        l->is_param  = 0;
+
+        if (n->n_children > 0) {
+            Val iv = emit_expr(cg, n->children[0]);
+            const char *st;
+            if (val_is_ptr(iv))       st = "ptr";
+            else if (type_is_fp(iv.type)) st = llvm_type(iv.type);
+            else                       st = "i64";
+            char stored[64];
+            if (!val_is_ptr(iv) && !val_is_64bit(iv) && !type_is_fp(iv.type)) {
+                int rp = new_reg(cg);
+                __c0c_emit(cg->out, "  %%t%d = sext i32 %s to i64\n", rp, iv.reg);
+                snprintf(stored, 64, "%%t%d", rp);
+            } else {
+                strncpy(stored, iv.reg, 63); stored[63] = '\0';
+            }
+            __c0c_emit(cg->out, "  store %s %s, ptr %%t%d\n", st, stored, r);
+        }
+        /* handle chained decls */
+        for (int i = 1; i < n->n_children; i++)
+            emit_stmt(cg, n->children[i]);
+        break;
+    }
+
+    case ND_EXPR_STMT:
+        if (n->n_children > 0) emit_expr(cg, n->children[0]);
+        break;
+
+    case ND_RETURN: {
+        if (n->ret_val) {
+            Val rv = emit_expr(cg, n->ret_val);
+            Type *rt = cg->cur_ret_type;
+            int rt_is_ptr  = (rt->kind == TY_PTR || rt->kind == TY_ARRAY);
+            int rt_is_void = (rt->kind == TY_VOID);
+            int rt_is_fp   = type_is_fp(rt);
+            const char *ret_type_str = llvm_type(rt);
+
+            if (rt_is_void) {
+                __c0c_emit(cg->out, "  ret void\n");
+            } else if (rt_is_fp) {
+                __c0c_emit(cg->out, "  ret %s %s\n", ret_type_str, rv.reg);
+            } else if (rt_is_ptr) {
+                /* Return ptr: coerce if needed */
+                if (val_is_ptr(rv)) {
+                    __c0c_emit(cg->out, "  ret ptr %s\n", rv.reg);
+                } else {
+                    int rc = new_reg(cg);
+                    char pr[64]; promote_to_i64(cg, rv, pr, 64);
+                    __c0c_emit(cg->out, "  %%t%d = inttoptr i64 %s to ptr\n", rc, pr);
+                    __c0c_emit(cg->out, "  ret ptr %%t%d\n", rc);
+                }
+            } else {
+                /* Return integer: use the declared LLVM return type */
+                char pr[64]; promote_to_i64(cg, rv, pr, 64);
+                if (strcmp(ret_type_str, "i8") == 0) {
+                    int rc = new_reg(cg);
+                    __c0c_emit(cg->out, "  %%t%d = trunc i64 %s to i8\n", rc, pr);
+                    __c0c_emit(cg->out, "  ret i8 %%t%d\n", rc);
+                } else if (strcmp(ret_type_str, "i16") == 0) {
+                    int rc = new_reg(cg);
+                    __c0c_emit(cg->out, "  %%t%d = trunc i64 %s to i16\n", rc, pr);
+                    __c0c_emit(cg->out, "  ret i16 %%t%d\n", rc);
+                } else if (strcmp(ret_type_str, "i32") == 0) {
+                    int rc = new_reg(cg);
+                    __c0c_emit(cg->out, "  %%t%d = trunc i64 %s to i32\n", rc, pr);
+                    __c0c_emit(cg->out, "  ret i32 %%t%d\n", rc);
+                } else {
+                    /* i64 or typedef_ref (mapped to i64) */
+                    __c0c_emit(cg->out, "  ret i64 %s\n", pr);
+                }
+            }
+        } else {
+            __c0c_emit(cg->out, "  ret void\n");
+        }
+        int dead = new_label(cg);
+        __c0c_emit(cg->out, "L%d:\n", dead);
+        break;
+    }
+
+    case ND_IF: {
+        Val cv    = emit_expr(cg, n->cond);
+        int rcond = emit_cond(cg, cv);
+        int lT   = new_label(cg);
+        int lF   = new_label(cg);
+        int lEnd = new_label(cg);
+        __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n",
+             rcond, lT, n->else_branch ? lF : lEnd);
+        __c0c_emit(cg->out, "L%d:\n", lT);
+        emit_stmt(cg, n->then_branch);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+        if (n->else_branch) {
+            __c0c_emit(cg->out, "L%d:\n", lF);
+            emit_stmt(cg, n->else_branch);
+            __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+        }
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+        break;
+    }
+
+    case ND_WHILE: {
+        int lCond = new_label(cg);
+        int lBody = new_label(cg);
+        int lEnd  = new_label(cg);
+        char old_break[64], old_cont[64];
+        strcpy(old_break, cg->break_label);
+        strcpy(old_cont,  cg->cont_label);
+        snprintf(cg->break_label, 64, "L%d", lEnd);
+        snprintf(cg->cont_label,  64, "L%d", lCond);
+
+        __c0c_emit(cg->out, "  br label %%L%d\n", lCond);
+        __c0c_emit(cg->out, "L%d:\n", lCond);
+        Val cv    = emit_expr(cg, n->loop_cond);
+        int rcond = emit_cond(cg, cv);
+        __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rcond, lBody, lEnd);
+        __c0c_emit(cg->out, "L%d:\n", lBody);
+        emit_stmt(cg, n->loop_body);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lCond);
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+
+        strcpy(cg->break_label, old_break);
+        strcpy(cg->cont_label,  old_cont);
+        break;
+    }
+
+    case ND_DO_WHILE: {
+        int lBody = new_label(cg);
+        int lCond = new_label(cg);
+        int lEnd  = new_label(cg);
+        char old_break[64], old_cont[64];
+        strcpy(old_break, cg->break_label);
+        strcpy(old_cont,  cg->cont_label);
+        snprintf(cg->break_label, 64, "L%d", lEnd);
+        snprintf(cg->cont_label,  64, "L%d", lCond);
+
+        __c0c_emit(cg->out, "  br label %%L%d\n", lBody);
+        __c0c_emit(cg->out, "L%d:\n", lBody);
+        emit_stmt(cg, n->loop_body);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lCond);
+        __c0c_emit(cg->out, "L%d:\n", lCond);
+        Val cv    = emit_expr(cg, n->loop_cond);
+        int rcond = emit_cond(cg, cv);
+        __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rcond, lBody, lEnd);
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+
+        strcpy(cg->break_label, old_break);
+        strcpy(cg->cont_label,  old_cont);
+        break;
+    }
+
+    case ND_FOR: {
+        int lCond = new_label(cg);
+        int lBody = new_label(cg);
+        int lPost = new_label(cg);
+        int lEnd  = new_label(cg);
+        char old_break[64], old_cont[64];
+        strcpy(old_break, cg->break_label);
+        strcpy(old_cont,  cg->cont_label);
+        snprintf(cg->break_label, 64, "L%d", lEnd);
+        snprintf(cg->cont_label,  64, "L%d", lPost);
+
+        scope_push(cg);
+        if (n->for_init) emit_stmt(cg, n->for_init);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lCond);
+        __c0c_emit(cg->out, "L%d:\n", lCond);
+        if (n->for_cond) {
+            Val cv    = emit_expr(cg, n->for_cond);
+            int rcond = emit_cond(cg, cv);
+            __c0c_emit(cg->out, "  br i1 %%t%d, label %%L%d, label %%L%d\n", rcond, lBody, lEnd);
+        } else {
+            __c0c_emit(cg->out, "  br label %%L%d\n", lBody);
+        }
+        __c0c_emit(cg->out, "L%d:\n", lBody);
+        emit_stmt(cg, n->for_body);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lPost);
+        __c0c_emit(cg->out, "L%d:\n", lPost);
+        if (n->for_post) emit_expr(cg, n->for_post);
+        __c0c_emit(cg->out, "  br label %%L%d\n", lCond);
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+        scope_pop(cg);
+
+        strcpy(cg->break_label, old_break);
+        strcpy(cg->cont_label,  old_cont);
+        break;
+    }
+
+    case ND_BREAK:
+        __c0c_emit(cg->out, "  br label %%%s\n", cg->break_label);
+        { int dead = new_label(cg); __c0c_emit(cg->out, "L%d:\n", dead); }
+        break;
+
+    case ND_CONTINUE:
+        __c0c_emit(cg->out, "  br label %%%s\n", cg->cont_label);
+        { int dead = new_label(cg); __c0c_emit(cg->out, "L%d:\n", dead); }
+        break;
+
+    case ND_SWITCH: {
+        /* Emit switch using LLVM 'switch' instruction.
+           We do a two-pass: first collect all case values/labels,
+           then emit the switch, then emit case bodies. */
+        Val sv = emit_expr(cg, n->cond);
+        int lEnd = new_label(cg);
+        char old_break[64];
+        strcpy(old_break, cg->break_label);
+        snprintf(cg->break_label, 64, "L%d", lEnd);
+
+        /* collect case labels from the switch body block */
+        Node *body = n->loop_body;
+        int n_cases = 0;
+        int case_labels[256];
+        long long case_vals[256];
+        int default_label = lEnd;
+
+        /* pre-allocate labels */
+        for (int i = 0; i < body->n_children && n_cases < 256; i++) {
+            Node *ch = body->children[i];
+            if (ch->kind == ND_CASE) {
+                case_labels[n_cases] = new_label(cg);
+                case_vals[n_cases]   = ch->cond ? ch->cond->ival : 0;
+                n_cases++;
+            } else if (ch->kind == ND_DEFAULT) {
+                default_label = new_label(cg);
+            }
+        }
+
+        /* promote switch value to i64 */
+        char sv_promoted[64];
+        promote_to_i64(cg, sv, sv_promoted, 64);
+        int rs = new_reg(cg);
+        __c0c_emit(cg->out, "  %%t%d = add i64 %s, 0\n", rs, sv_promoted);
+        __c0c_emit(cg->out, "  switch i64 %%t%d, label %%L%d [\n", rs, default_label);
+        int ci = 0;
+        for (int i = 0; i < body->n_children; i++) {
+            Node *ch = body->children[i];
+            if (ch->kind == ND_CASE && ci < n_cases) {
+                __c0c_emit(cg->out, "    i64 %lld, label %%L%d\n", case_vals[ci], case_labels[ci]);
+                ci++;
+            }
+        }
+        __c0c_emit(cg->out, "  ]\n");
+
+        /* emit case bodies */
+        ci = 0;
+        int def_ci = 0;
+        for (int i = 0; i < body->n_children; i++) {
+            Node *ch = body->children[i];
+            if (ch->kind == ND_CASE && ci < n_cases) {
+                __c0c_emit(cg->out, "L%d:\n", case_labels[ci++]);
+                if (ch->n_children > 0) emit_stmt(cg, ch->children[0]);
+                /* fallthrough: jump to next label or end */
+                int next = (ci < n_cases) ? case_labels[ci] : lEnd;
+                __c0c_emit(cg->out, "  br label %%L%d\n", next);
+            } else if (ch->kind == ND_DEFAULT) {
+                __c0c_emit(cg->out, "L%d:\n", default_label);
+                if (ch->n_children > 0) emit_stmt(cg, ch->children[0]);
+                __c0c_emit(cg->out, "  br label %%L%d\n", lEnd);
+                def_ci++;
+            } else {
+                emit_stmt(cg, ch);
+            }
+        }
+        __c0c_emit(cg->out, "L%d:\n", lEnd);
+        strcpy(cg->break_label, old_break);
+        break;
+    }
+
+    case ND_CASE:
+        /* handled inside ND_SWITCH; if encountered standalone emit body */
+        if (n->n_children > 0) emit_stmt(cg, n->children[0]);
+        break;
+
+    case ND_DEFAULT:
+        if (n->n_children > 0) emit_stmt(cg, n->children[0]);
+        break;
+
+    case ND_LABEL: {
+        /* Named label for goto — emit a branch to it first so any preceding
+           dead block (from break/goto) has a proper terminator */
+        __c0c_emit(cg->out, "  br label %%%s\n", n->sval);
+        __c0c_emit(cg->out, "%s:\n", n->sval);
+        if (n->n_children > 0) emit_stmt(cg, n->children[0]);
+        break;
+    }
+
+    case ND_GOTO:
+        __c0c_emit(cg->out, "  br label %%%s\n", n->sval);
+        { int dead = new_label(cg); __c0c_emit(cg->out, "L%d:\n", dead); }
+        break;
+
+    case ND_TYPEDEF:
+        /* nothing to emit */
+        break;
+
+    default:
+        /* try as expression */
+        emit_expr(cg, n);
+        break;
+    }
+}
+
+/* ================================================================ Functions */
+
+static void emit_func_def(Codegen *cg, Node *n) {
+    Type *ft = n->func_type;
+    if (!ft || ft->kind != TY_FUNC) return;
+
+    cg->n_locals = 0;
+    cg->reg      = 0;
+    cg->label    = 0;
+    cg->cur_ret_type = ft->ret ? ft->ret : default_int_type();
+    strncpy(cg->cur_func, n->func_name ? n->func_name : "anon", 127);
+
+    /* linkage */
+    const char *linkage = n->is_static ? "internal" : "dso_local";
+
+    __c0c_emit(cg->out, "define %s %s @%s(",
+         linkage, llvm_ret_type(ft),
+         n->func_name ? n->func_name : "anon");
+
+    /* parameters */
+    scope_push(cg);
+    int emitted_params = 0;
+    for (int i = 0; i < ft->param_count; i++) {
+        Type *pt_type = ft->params[i].type;
+        /* skip void-only parameter list like f(void) */
+        if (pt_type && pt_type->kind == TY_VOID && ft->param_count == 1) break;
+        if (emitted_params) __c0c_emit(cg->out, ", ");
+        /* Use i64 for all integer params, ptr for pointers and structs */
+        const char *pt;
+        Type *stored_type;
+        if (!pt_type || type_is_fp(pt_type)) {
+            pt = pt_type ? llvm_type(pt_type) : "i64";
+            stored_type = pt_type;
+        } else if (pt_type->kind == TY_PTR || pt_type->kind == TY_ARRAY) {
+            pt = "ptr"; stored_type = default_ptr_type();
+        } else if (pt_type->kind == TY_STRUCT || pt_type->kind == TY_UNION ||
+                   pt_type->kind == TY_TYPEDEF_REF) {
+            /* Struct/typedef params treated as ptr (our simplified ABI) */
+            pt = "ptr"; stored_type = default_ptr_type();
+        } else {
+            pt = "i64"; stored_type = default_i64_type();
+        }
+        int pr = new_reg(cg);
+        __c0c_emit(cg->out, "%s %%t%d", pt, pr);
+        emitted_params++;
+        if (n->param_names && n->param_names[i]) {
+            if (cg->n_locals >= MAX_LOCALS) { fprintf(stderr, "c0c: too many locals\n"); exit(1); }
+            Local *l = &cg->locals[cg->n_locals++];
+            l->name      = strdup(n->param_names[i]);
+            l->llvm_name = malloc(32);
+            snprintf(l->llvm_name, 32, "%%t%d", pr);
+            l->type      = stored_type;
+            l->is_param  = 1;
+        }
+    }
+    if (ft->variadic) { if (emitted_params) __c0c_emit(cg->out, ", "); __c0c_emit(cg->out, "..."); }
+    __c0c_emit(cg->out, ") {\n");
+    __c0c_emit(cg->out, "entry:\n");
+
+    /* body */
+    emit_stmt(cg, n->loop_body);
+
+    /* implicit return — always needed since last block may have fallen through */
+    if (!ft->ret || ft->ret->kind == TY_VOID) {
+        __c0c_emit(cg->out, "  ret void\n");
+    } else if (ft->ret->kind == TY_PTR || ft->ret->kind == TY_ARRAY) {
+        __c0c_emit(cg->out, "  ret ptr null\n");
+    } else if (type_is_fp(ft->ret)) {
+        __c0c_emit(cg->out, "  ret %s 0.0\n", llvm_type(ft->ret));
     } else {
-        const char *to_ty = llvm_type(to);
-        if (from_vt == VT_F32 || from_vt == VT_F64) {
-            const char *op = is_unsigned(to) ? "fptoui" : "fptosi";
-            fprintf(out_fp, "  %%%d = %s %s %s to %s\n", r, op,
-                    (from_vt == VT_F64) ? "double" : "float", v.reg, to_ty);
-        } else {
-            int from_bits = (from_vt == VT_I1) ? 1 :
-                            (from_vt == VT_I8) ? 8 :
-                            (from_vt == VT_I16) ? 16 :
-                            (from_vt == VT_I64) ? 64 : 32;
-            int to_bits = (to_vt == VT_I8) ? 8 : (to_vt == VT_I16) ? 16 : (to_vt == VT_I64) ? 64 : 32;
-            if (from_bits == to_bits) {
-                v.cty = to;
-                return v;
-            } else if (from_bits < to_bits) {
-                const char *op = (from_vt == VT_I1) ? "zext" : (is_unsigned(v.cty) ? "zext" : "sext");
-                fprintf(out_fp, "  %%%d = %s %s %s to %s\n", r, op, llvm_type_from_vt(from_vt), v.reg, to_ty);
-            } else {
-                fprintf(out_fp, "  %%%d = trunc %s %s to %s\n", r, llvm_type_from_vt(from_vt), v.reg, to_ty);
-            }
-        }
+        /* Integer return: match the declared LLVM return type */
+        const char *rts = llvm_type(ft->ret);
+        if      (strcmp(rts,"i8")  == 0) __c0c_emit(cg->out, "  ret i8 0\n");
+        else if (strcmp(rts,"i16") == 0) __c0c_emit(cg->out, "  ret i16 0\n");
+        else if (strcmp(rts,"i32") == 0) __c0c_emit(cg->out, "  ret i32 0\n");
+        else                             __c0c_emit(cg->out, "  ret i64 0\n");
     }
-    free(v.reg);
-    char *res = malloc(64);
-    sprintf(res, "%%%d", r);
-    return value_from_ctype(res, to);
+
+    __c0c_emit(cg->out, "}\n\n");
+    scope_pop(cg);
 }
 
-static Value to_i1(Value v) {
-    if (v.vt == VT_I1) return v;
-    if (v.reg == NULL) error("使用了 void 表達式");
-    int r = reg_cnt++;
-    if (v.vt == VT_PTR) {
-        fprintf(out_fp, "  %%%d = icmp ne ptr %s, null\n", r, v.reg);
-    } else if (v.vt == VT_F32 || v.vt == VT_F64) {
-        const char *fty = (v.vt == VT_F64) ? "double" : "float";
-        fprintf(out_fp, "  %%%d = fcmp one %s %s, 0.0\n", r, fty, v.reg);
-    } else {
-        fprintf(out_fp, "  %%%d = icmp ne %s %s, 0\n", r, llvm_type(v.cty), v.reg);
+/* ================================================================ Global variables */
+
+static void emit_global_var(Codegen *cg, Node *n) {
+    if (!n->var_name) return;
+
+    Type *vt = n->var_type;
+
+    /* Function-type declarations: emit as 'declare' not global variable */
+    if (vt && vt->kind == TY_FUNC) {
+        /* Check if already defined (function body present) — if so, skip declare */
+        int found = 0;
+        for (int i = 0; i < cg->n_globals; i++)
+            if (strcmp(cg->globals[i].name, n->var_name) == 0) { found = 1; break; }
+        if (found) return;  /* already registered as defined — don't emit declare */
+        /* Register as extern */
+        if (cg->n_globals < MAX_GLOBALS) {
+            cg->globals[cg->n_globals].name      = strdup(n->var_name);
+            cg->globals[cg->n_globals].type      = vt;
+            cg->globals[cg->n_globals].is_extern = 1;
+            cg->n_globals++;
+        }
+        /* Build param list string — must match define param types */
+        char params_buf[512] = {0};
+        int pos = 0;
+        for (int i = 0; i < vt->param_count && pos < 480; i++) {
+            Type *pt = vt->params[i].type;
+            if (pt && pt->kind == TY_VOID && vt->param_count == 1) break;
+            if (i) pos += snprintf(params_buf + pos, 512 - pos, ", ");
+            /* Match the param type rules from emit_func_def */
+            const char *pt_str;
+            if (!pt || type_is_fp(pt)) {
+                pt_str = pt ? llvm_type(pt) : "i64";
+            } else if (pt->kind == TY_PTR || pt->kind == TY_ARRAY) {
+                pt_str = "ptr";
+            } else if (pt->kind == TY_STRUCT || pt->kind == TY_UNION ||
+                       pt->kind == TY_TYPEDEF_REF) {
+                pt_str = "ptr";
+            } else {
+                pt_str = "i64";
+            }
+            pos += snprintf(params_buf + pos, 512 - pos, "%s", pt_str);
+        }
+        if (vt->variadic) {
+            if (vt->param_count) pos += snprintf(params_buf + pos, 512 - pos, ", ");
+            pos += snprintf(params_buf + pos, 512 - pos, "...");
+        }
+        __c0c_emit(cg->out, "declare %s @%s(%s)\n", llvm_ret_type(vt), n->var_name, params_buf);
+        return;
     }
-    free(v.reg);
-    char *res = malloc(64);
-    sprintf(res, "%%%d", r);
-    return value_from_raw(res, VT_I1, TY_INT);
+
+    /* register */
+    int exists = 0;
+    for (int i = 0; i < cg->n_globals; i++)
+        if (strcmp(cg->globals[i].name, n->var_name) == 0) { exists = 1; break; }
+    if (!exists && cg->n_globals < MAX_GLOBALS) {
+        cg->globals[cg->n_globals].name      = strdup(n->var_name);
+        cg->globals[cg->n_globals].type      = vt;
+        cg->globals[cg->n_globals].is_extern = n->is_extern;
+        cg->n_globals++;
+    }
+
+    if (n->is_extern) {
+        __c0c_emit(cg->out, "@%s = external global %s\n",
+             n->var_name, llvm_type(vt));
+        return;
+    }
+
+    const char *linkage = n->is_static ? "internal" : "dso_local";
+    const char *lt = llvm_type(vt);
+    __c0c_emit(cg->out, "@%s = %s global %s zeroinitializer\n", n->var_name, linkage, lt);
 }
 
-static Value to_i32(Value v) {
-    return cast_value(v, TY_INT);
+/* ================================================================ Public API */
+
+Codegen *codegen_new(FILE *out, const char *source_filename) {
+    Codegen *cg = calloc(1, sizeof(Codegen));
+    if (!cg) { perror("calloc"); exit(1); }
+    cg->out             = out;
+    cg->source_filename = source_filename;
+    return cg;
 }
 
-static Value to_i8(Value v) {
-    return cast_value(v, TY_CHAR);
+void codegen_free(Codegen *cg) {
+    for (int i = 0; i < cg->n_globals; i++) free(cg->globals[i].name);
+    for (int i = 0; i < cg->n_strings; i++) free(cg->str_literals[i]);
+    free(cg);
 }
 
-static Value gen_lvalue_addr(ASTNode *node) {
-    if (node->type == AST_VAR) {
-        VarSlot *slot = var_find(node->name);
-        const char *pref = slot_prefix(slot);
-        if (slot->array_len > 0) {
-            int r = reg_cnt++;
-            if (base_of(slot->ty) == TY_STRUCT) {
-                int total = slot->array_len * struct_size(slot->struct_id);
-                fprintf(out_fp, "  %%%d = getelementptr [%d x i8], ptr %s%s, i32 0, i32 0\n",
-                        r, total, pref, slot->ir);
-            } else {
-                fprintf(out_fp, "  %%%d = getelementptr [%d x %s], ptr %s%s, i32 0, i32 0\n",
-                        r, slot->array_len, llvm_elem_type(slot->ty), pref, slot->ir);
-            }
-            char *res = malloc(64);
-            sprintf(res, "%%%d", r);
-            return value_from_raw(res, VT_PTR, slot->ty);
-        }
-        char *res = slot_ref(slot);
-        return value_from_raw(res, VT_PTR, slot->ty);
-    }
-    if (node->type == AST_DEREF) {
-        return gen_expr(node->left);
-    }
-    if (node->type == AST_INDEX) {
-        ASTNode *base = node->left;
-        Value base_ptr;
-        if (base->type == AST_VAR) {
-            VarSlot *slot = var_find(base->name);
-            const char *pref = slot_prefix(slot);
-            if (slot->array_len > 0) {
-                int r = reg_cnt++;
-                if (base_of(slot->ty) == TY_STRUCT) {
-                    int total = slot->array_len * struct_size(slot->struct_id);
-                    fprintf(out_fp, "  %%%d = getelementptr [%d x i8], ptr %s%s, i32 0, i32 0\n",
-                            r, total, pref, slot->ir);
-                } else {
-                    fprintf(out_fp, "  %%%d = getelementptr [%d x %s], ptr %s%s, i32 0, i32 0\n",
-                            r, slot->array_len, llvm_elem_type(slot->ty), pref, slot->ir);
-                }
-                char *res = malloc(64);
-                sprintf(res, "%%%d", r);
-                base_ptr = value_from_ctype(res, slot->ty);
-            } else {
-                base_ptr = gen_expr(base);
-            }
-        } else {
-            base_ptr = gen_expr(base);
-        }
-        Value idx = to_i32(gen_expr(node->right));
-        int esz = elem_size(base->ty, base->struct_id);
-        if (esz <= 0) esz = 1;
-        if (esz != 1) {
-            int r_mul = reg_cnt++;
-            fprintf(out_fp, "  %%%d = mul i32 %s, %d\n", r_mul, idx.reg, esz);
-            free(idx.reg);
-            char *mul_reg = malloc(64);
-            sprintf(mul_reg, "%%%d", r_mul);
-            idx = value_from_raw(mul_reg, VT_I32, TY_INT);
-        }
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = getelementptr i8, ptr %s, i32 %s\n", r, base_ptr.reg, idx.reg);
-        free(base_ptr.reg);
-        free(idx.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_raw(res, VT_PTR, TY_INT_PTR);
-    }
-    if (node->type == AST_MEMBER) {
-        Value base_ptr;
-        if (node->op) {
-            base_ptr = gen_expr(node->left);
-        } else {
-            base_ptr = gen_lvalue_addr(node->left);
-        }
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = getelementptr i8, ptr %s, i32 %d\n", r, base_ptr.reg, node->val);
-        free(base_ptr.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_raw(res, VT_PTR, TY_INT_PTR);
-    }
-    error("不支援的取址");
-    return value_from_raw(NULL, VT_PTR, TY_INT_PTR);
-}
+void codegen_emit(Codegen *cg, Node *tu) {
+    if (!tu) return;
 
-static Value gen_expr(ASTNode *node) {
-    if (node->type == AST_NUM) {
-        char *res = malloc(64);
-        sprintf(res, "%d", node->val);
-        return value_from_ctype(res, node->ty);
-    } else if (node->type == AST_FLOAT) {
-        char *res = malloc(64);
-        if (node->ty == TY_FLOAT) snprintf(res, 64, "%.9f", node->fval);
-        else snprintf(res, 64, "%.17f", node->fval);
-        return value_from_ctype(res, node->ty);
-    } else if (node->type == AST_STR) {
-        int id = add_string_literal(node->str_val);
-        int len = (int)strlen(node->str_val) + 1;
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = getelementptr [%d x i8], ptr @.str.%d, i32 0, i32 0\n",
-                r, len, id);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_raw(res, VT_PTR, TY_CHAR_PTR);
-    } else if (node->type == AST_VAR) {
-        VarSlot *slot = var_find(node->name);
-        const char *pref = slot_prefix(slot);
-        if (slot->array_len > 0) {
-            int r = reg_cnt++;
-            if (base_of(slot->ty) == TY_STRUCT) {
-                int total = slot->array_len * struct_size(slot->struct_id);
-                fprintf(out_fp, "  %%%d = getelementptr [%d x i8], ptr %s%s, i32 0, i32 0\n",
-                        r, total, pref, slot->ir);
-            } else {
-                fprintf(out_fp, "  %%%d = getelementptr [%d x %s], ptr %s%s, i32 0, i32 0\n",
-                        r, slot->array_len, llvm_elem_type(slot->ty), pref, slot->ir);
-            }
-            char *res = malloc(64);
-            sprintf(res, "%%%d", r);
-            return value_from_ctype(res, slot->ty);
+    /* ---- module header ---- */
+    __c0c_emit(cg->out, "; ModuleID = '%s'\n", cg->source_filename);
+    __c0c_emit(cg->out, "source_filename = \"%s\"\n", cg->source_filename);
+    __c0c_emit(cg->out, "target datalayout = \"e-m:o-i64:64-i128:128-n32:64-S128\"\n");
+    __c0c_emit(cg->out, "target triple = \"arm64-apple-macosx15.0.0\"\n\n");
+
+    /* ---- standard library declarations ---- */
+    __c0c_emit(cg->out, "; stdlib declarations\n");
+    __c0c_emit(cg->out, "declare ptr @malloc(i64)\n");
+    __c0c_emit(cg->out, "declare ptr @calloc(i64, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @realloc(ptr, i64)\n");
+    __c0c_emit(cg->out, "declare void @free(ptr)\n");
+    __c0c_emit(cg->out, "declare i64 @strlen(ptr)\n");
+    __c0c_emit(cg->out, "declare ptr @strdup(ptr)\n");
+    __c0c_emit(cg->out, "declare ptr @strndup(ptr, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @strcpy(ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare ptr @strncpy(ptr, ptr, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @strcat(ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare ptr @strchr(ptr, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @strstr(ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @strcmp(ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @strncmp(ptr, ptr, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @memcpy(ptr, ptr, i64)\n");
+    __c0c_emit(cg->out, "declare ptr @memset(ptr, i32, i64)\n");
+    __c0c_emit(cg->out, "declare i32 @memcmp(ptr, ptr, i64)\n");
+    __c0c_emit(cg->out, "declare i32 @printf(ptr, ...)\n");
+    __c0c_emit(cg->out, "declare i32 @fprintf(ptr, ptr, ...)\n");
+    __c0c_emit(cg->out, "declare i32 @sprintf(ptr, ptr, ...)\n");
+    __c0c_emit(cg->out, "declare i32 @snprintf(ptr, i64, ptr, ...)\n");
+    __c0c_emit(cg->out, "declare i32 @vfprintf(ptr, ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @vsnprintf(ptr, i64, ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare ptr @fopen(ptr, ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @fclose(ptr)\n");
+    __c0c_emit(cg->out, "declare i64 @fread(ptr, i64, i64, ptr)\n");
+    __c0c_emit(cg->out, "declare i64 @fwrite(ptr, i64, i64, ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @fseek(ptr, i64, i32)\n");
+    __c0c_emit(cg->out, "declare i64 @ftell(ptr)\n");
+    __c0c_emit(cg->out, "declare void @perror(ptr)\n");
+    __c0c_emit(cg->out, "declare void @exit(i32)\n");
+    __c0c_emit(cg->out, "declare ptr @getenv(ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @atoi(ptr)\n");
+    __c0c_emit(cg->out, "declare i64 @atol(ptr)\n");
+    __c0c_emit(cg->out, "declare i64 @strtol(ptr, ptr, i32)\n");
+    __c0c_emit(cg->out, "declare i64 @strtoll(ptr, ptr, i32)\n");
+    __c0c_emit(cg->out, "declare double @atof(ptr)\n");
+    __c0c_emit(cg->out, "declare i32 @isspace(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @isdigit(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @isalpha(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @isalnum(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @isxdigit(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @isupper(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @islower(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @toupper(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @tolower(i32)\n");
+    __c0c_emit(cg->out, "declare i32 @assert(i32)\n");
+    /* c0c_compat.c provides these real functions. Declare them in the IR. */
+    __c0c_emit(cg->out, "declare ptr @__c0c_stderr()\n");
+    __c0c_emit(cg->out, "declare ptr @__c0c_stdout()\n");
+    __c0c_emit(cg->out, "declare ptr @__c0c_stdin()\n");
+    __c0c_emit(cg->out, "declare ptr @__c0c_get_tbuf(i32)\n");
+    __c0c_emit(cg->out, "declare ptr @__c0c_get_td_name(i64)\n");
+    __c0c_emit(cg->out, "declare i64 @__c0c_get_td_kind(i64)\n");
+    __c0c_emit(cg->out, "declare void @__c0c_emit(ptr, ptr, ...)\n");
+    __c0c_emit(cg->out, "\n");
+
+    /* Register stdlib in globals table so calls don't re-declare */
+    const char *stdlib_names[] = {
+        "malloc","calloc","realloc","free","strlen","strdup","strndup",
+        "strcpy","strncpy","strcat","strchr","strstr","strcmp","strncmp",
+        "memcpy","memset","memcmp","printf","fprintf","sprintf","snprintf","vfprintf","vsnprintf",
+        "fopen","fclose","fread","fwrite","fseek","ftell","perror","exit",
+        "getenv","atoi","atol","strtol","strtoll","atof",
+        "isspace","isdigit","isalpha","isalnum","isxdigit","isupper","islower",
+        "toupper","tolower","assert",
+        "va_start","va_end","va_copy",
+        "__c0c_va_start","__c0c_va_end","__c0c_va_copy",
+        "__c0c_stderr","__c0c_stdout","__c0c_stdin",
+        "__c0c_emit","__c0c_get_tbuf",
+        "__c0c_get_td_name","__c0c_get_td_kind",
+        "stderr","stdout","stdin",
+        NULL
+    };
+    for (int si = 0; stdlib_names[si]; si++) {
+        int found = 0;
+        for (int j = 0; j < cg->n_globals; j++)
+            if (strcmp(cg->globals[j].name, stdlib_names[si]) == 0) { found = 1; break; }
+        if (!found && cg->n_globals < MAX_GLOBALS) {
+            cg->globals[cg->n_globals].name = strdup(stdlib_names[si]);
+            cg->globals[cg->n_globals].type = NULL;
+            cg->globals[cg->n_globals].is_extern = 1;
+            cg->n_globals++;
         }
-        if (slot->ty == TY_STRUCT) {
-            char *res = slot_ref(slot);
-            return value_from_raw(res, VT_PTR, TY_STRUCT_PTR);
-        }
-        int r = reg_cnt++;
-        const char *ty = llvm_type(slot->ty);
-        fprintf(out_fp, "  %%%d = load %s, ptr %s%s\n", r, ty, pref, slot->ir);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        if (is_ptr(slot->ty)) return value_from_raw(res, VT_PTR, slot->ty);
-        return value_from_ctype(res, slot->ty);
-    } else if (node->type == AST_CALL) {
-        Value raw_vals[10];
-        Value final_vals[10];
-        CType call_types[10];
-        int call_struct_ids[10];
-        int arg_count = 0;
-        ASTNode *arg = node->left;
-        while (arg) {
-            if (arg_count >= 10) error("參數過多");
-            raw_vals[arg_count] = gen_expr(arg);
-            call_types[arg_count] = arg->ty;
-            call_struct_ids[arg_count] = arg->struct_id;
-            arg = arg->next;
-            arg_count++;
-        }
-        int is_printf = (strcmp(node->name, "printf") == 0);
-        FuncSig *sig = find_func_sig(node->name);
-        const char *ret_ty = (sig && sig->ret == TY_VOID) ? "void" : llvm_type(sig ? sig->ret : TY_INT);
-        for (int i = 0; i < arg_count; i++) {
-            if (is_printf) {
-                CType ct = call_types[i];
-                if (ct == TY_FLOAT) ct = TY_DOUBLE;
-                if (ct == TY_CHAR || ct == TY_UCHAR || ct == TY_SHORT || ct == TY_USHORT) ct = TY_INT;
-                call_types[i] = ct;
-                if (is_ptr(ct)) final_vals[i] = raw_vals[i];
-                else final_vals[i] = cast_value(raw_vals[i], ct);
-            } else if (sig && i < sig->param_cnt) {
-                CType pt = sig->params[i];
-                if (is_ptr(pt)) {
-                    if (!is_ptr(call_types[i])) error("指標參數需要 ptr");
-                    if (pt == TY_STRUCT_PTR) {
-                        if (call_types[i] != TY_STRUCT_PTR || sig->param_struct_id[i] != call_struct_ids[i]) {
-                            error("struct 指標參數型別不相容");
-                        }
-                    } else if (call_types[i] != pt) {
-                        error("指標參數型別不相容");
-                    }
-                    final_vals[i] = raw_vals[i];
-                } else {
-                    final_vals[i] = cast_value(raw_vals[i], pt);
-                }
-                call_types[i] = pt;
-            } else {
-                final_vals[i] = raw_vals[i];
-            }
-        }
-
-        int r = -1;
-        if (is_printf) {
-            r = reg_cnt++;
-            fprintf(out_fp, "  %%%d = call i32 (ptr, ...) @%s(", r, node->name);
-        } else if (sig && sig->ret == TY_VOID) {
-            fprintf(out_fp, "  call void @%s(", node->name);
-        } else {
-            r = reg_cnt++;
-            fprintf(out_fp, "  %%%d = call %s @%s(", r, ret_ty, node->name);
-        }
-        for (int i = 0; i < arg_count; i++) {
-            if (i > 0) fprintf(out_fp, ", ");
-            if (is_ptr(call_types[i])) {
-                fprintf(out_fp, "ptr %s", final_vals[i].reg);
-                free(final_vals[i].reg);
-            } else {
-                fprintf(out_fp, "%s %s", llvm_type(call_types[i]), final_vals[i].reg);
-                free(final_vals[i].reg);
-            }
-        }
-        fprintf(out_fp, ")\n");
-        if (!is_printf && sig && sig->ret == TY_VOID) {
-            return value_from_raw(NULL, VT_I32, TY_INT);
-        }
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        if (!is_printf && sig) return value_from_ctype(res, sig->ret);
-        return value_from_ctype(res, TY_INT);
-    } else if (node->type == AST_ADDR) {
-        return gen_lvalue_addr(node->left);
-    } else if (node->type == AST_DEREF) {
-        Value ptr = gen_expr(node->left);
-        if (node->ty == TY_STRUCT) {
-            return ptr;
-        }
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = load %s, ptr %s\n", r, llvm_elem_type(node->ty), ptr.reg);
-        free(ptr.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_ctype(res, node->ty);
-    } else if (node->type == AST_INDEX) {
-        Value addr = gen_lvalue_addr(node);
-        if (node->ty == TY_STRUCT) {
-            return addr;
-        }
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = load %s, ptr %s\n", r, llvm_elem_type(node->ty), addr.reg);
-        free(addr.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_ctype(res, node->ty);
-    } else if (node->type == AST_MEMBER) {
-        Value addr = gen_lvalue_addr(node);
-        if (node->ty == TY_STRUCT) {
-            return addr;
-        }
-        int r = reg_cnt++;
-        fprintf(out_fp, "  %%%d = load %s, ptr %s\n", r, llvm_elem_type(node->ty), addr.reg);
-        free(addr.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        return value_from_ctype(res, node->ty);
-    } else if (node->type == AST_BINOP) {
-        if (node->op == TK_ANDAND || node->op == TK_OROR) {
-            int tmp = reg_cnt++;
-            int rhs_label = label_cnt++;
-            int short_label = label_cnt++;
-            int end_label = label_cnt++;
-            fprintf(out_fp, "  %%%d = alloca i1\n", tmp);
-            Value left_cond = gen_cond(node->left);
-            if (node->op == TK_ANDAND) {
-                fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", left_cond.reg, rhs_label, short_label);
-            } else {
-                fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", left_cond.reg, short_label, rhs_label);
-            }
-            free(left_cond.reg);
-
-            fprintf(out_fp, "L%d:\n", rhs_label);
-            Value right_cond = gen_cond(node->right);
-            fprintf(out_fp, "  store i1 %s, ptr %%%d\n", right_cond.reg, tmp);
-            free(right_cond.reg);
-            fprintf(out_fp, "  br label %%L%d\n", end_label);
-
-            fprintf(out_fp, "L%d:\n", short_label);
-            fprintf(out_fp, "  store i1 %s, ptr %%%d\n", (node->op == TK_ANDAND) ? "0" : "1", tmp);
-            fprintf(out_fp, "  br label %%L%d\n", end_label);
-
-            fprintf(out_fp, "L%d:\n", end_label);
-            int r = reg_cnt++;
-            fprintf(out_fp, "  %%%d = load i1, ptr %%%d\n", r, tmp);
-            char *res = malloc(64);
-            sprintf(res, "%%%d", r);
-            return value_from_raw(res, VT_I1, TY_INT);
-        }
-
-        if ((node->op == TK_EQ || node->op == TK_NE) &&
-            (is_ptr(node->left->ty) || is_ptr(node->right->ty))) {
-            Value l = gen_expr(node->left);
-            Value r;
-            if (is_ptr(node->left->ty) && is_ptr(node->right->ty)) {
-                if (node->left->ty != node->right->ty ||
-                    (node->left->ty == TY_STRUCT_PTR && node->left->struct_id != node->right->struct_id)) {
-                    error("指標比較型別不相容");
-                }
-                r = gen_expr(node->right);
-            } else {
-                ASTNode *other = is_ptr(node->left->ty) ? node->right : node->left;
-                if (other->type == AST_NUM && other->val == 0) {
-                    char *res = malloc(16);
-                    strcpy(res, "null");
-                    r = value_from_raw(res, VT_PTR, TY_INT_PTR);
-                } else {
-                    error("指標只能與 0 或指標比較");
-                }
-            }
-            int rcmp = reg_cnt++;
-            fprintf(out_fp, "  %%%d = icmp %s ptr %s, %s\n", rcmp,
-                    (node->op == TK_EQ) ? "eq" : "ne", l.reg, r.reg);
-            free(l.reg);
-            free(r.reg);
-            char *res = malloc(64);
-            sprintf(res, "%%%d", rcmp);
-            return value_from_raw(res, VT_I1, TY_INT);
-        }
-
-        if ((node->op == TK_LT || node->op == TK_GT || node->op == TK_LE || node->op == TK_GE) &&
-            (is_ptr(node->left->ty) || is_ptr(node->right->ty))) {
-            if (!is_ptr(node->left->ty) || !is_ptr(node->right->ty)) {
-                error("指標只能與指標比較");
-            }
-            if (node->left->ty != node->right->ty ||
-                (node->left->ty == TY_STRUCT_PTR && node->left->struct_id != node->right->struct_id)) {
-                error("指標比較型別不相容");
-            }
-            Value l = gen_expr(node->left);
-            Value r = gen_expr(node->right);
-            int rl = reg_cnt++;
-            int rr = reg_cnt++;
-            fprintf(out_fp, "  %%%d = ptrtoint ptr %s to i64\n", rl, l.reg);
-            fprintf(out_fp, "  %%%d = ptrtoint ptr %s to i64\n", rr, r.reg);
-            int rcmp = reg_cnt++;
-            const char *op = (node->op == TK_LT) ? "slt" :
-                             (node->op == TK_LE) ? "sle" :
-                             (node->op == TK_GT) ? "sgt" : "sge";
-            fprintf(out_fp, "  %%%d = icmp %s i64 %%%d, %%%d\n", rcmp, op, rl, rr);
-            free(l.reg);
-            free(r.reg);
-            char *res = malloc(64);
-            sprintf(res, "%%%d", rcmp);
-            return value_from_raw(res, VT_I1, TY_INT);
-        }
-
-        if ((node->op == TK_PLUS || node->op == TK_MINUS) &&
-            (is_ptr(node->left->ty) || is_ptr(node->right->ty))) {
-            if (is_ptr(node->left->ty) && is_ptr(node->right->ty)) {
-                if (node->op != TK_MINUS) error("不支援指標相加");
-                if (node->left->ty != node->right->ty ||
-                    (node->left->ty == TY_STRUCT_PTR && node->left->struct_id != node->right->struct_id)) {
-                    error("指標相減型別不相容");
-                }
-                Value l = gen_expr(node->left);
-                Value r = gen_expr(node->right);
-                int rl = reg_cnt++;
-                int rr = reg_cnt++;
-                fprintf(out_fp, "  %%%d = ptrtoint ptr %s to i64\n", rl, l.reg);
-                fprintf(out_fp, "  %%%d = ptrtoint ptr %s to i64\n", rr, r.reg);
-                int rdiff = reg_cnt++;
-                fprintf(out_fp, "  %%%d = sub i64 %%%d, %%%d\n", rdiff, rl, rr);
-                int esz = elem_size(node->left->ty, node->left->struct_id);
-                int rdiv = rdiff;
-                if (esz > 1) {
-                    rdiv = reg_cnt++;
-                    fprintf(out_fp, "  %%%d = sdiv i64 %%%d, %d\n", rdiv, rdiff, esz);
-                }
-                int rtr = reg_cnt++;
-                fprintf(out_fp, "  %%%d = trunc i64 %%%d to i32\n", rtr, rdiv);
-                free(l.reg);
-                free(r.reg);
-                char *res = malloc(64);
-                sprintf(res, "%%%d", rtr);
-                return value_from_ctype(res, TY_INT);
-            } else {
-                ASTNode *ptr_node = is_ptr(node->left->ty) ? node->left : node->right;
-                ASTNode *int_node = is_ptr(node->left->ty) ? node->right : node->left;
-                Value base = gen_expr(ptr_node);
-                Value idx = to_i32(gen_expr(int_node));
-                if (node->op == TK_MINUS && is_ptr(node->left->ty)) {
-                    int rneg = reg_cnt++;
-                    fprintf(out_fp, "  %%%d = sub i32 0, %s\n", rneg, idx.reg);
-                    free(idx.reg);
-                    char *neg = malloc(64);
-                    sprintf(neg, "%%%d", rneg);
-                    idx = value_from_raw(neg, VT_I32, TY_INT);
-                }
-                int esz = elem_size(ptr_node->ty, ptr_node->struct_id);
-                if (esz > 1) {
-                    int r_mul = reg_cnt++;
-                    fprintf(out_fp, "  %%%d = mul i32 %s, %d\n", r_mul, idx.reg, esz);
-                    free(idx.reg);
-                    char *mul = malloc(64);
-                    sprintf(mul, "%%%d", r_mul);
-                    idx = value_from_raw(mul, VT_I32, TY_INT);
-                }
-                int r = reg_cnt++;
-                fprintf(out_fp, "  %%%d = getelementptr i8, ptr %s, i32 %s\n",
-                        r, base.reg, idx.reg);
-                free(base.reg);
-                free(idx.reg);
-                char *res = malloc(64);
-                sprintf(res, "%%%d", r);
-                return value_from_raw(res, VT_PTR, TY_INT_PTR);
-            }
-        }
-
-        CType ct = common_arith_type(node->left->ty, node->right->ty);
-        Value left = cast_value(gen_expr(node->left), ct);
-        Value right = cast_value(gen_expr(node->right), ct);
-        int r = reg_cnt++;
-        if (is_float(ct)) {
-            const char *fty = (ct == TY_DOUBLE) ? "double" : "float";
-            if (node->op == '+') fprintf(out_fp, "  %%%d = fadd %s %s, %s\n", r, fty, left.reg, right.reg);
-            if (node->op == '-') fprintf(out_fp, "  %%%d = fsub %s %s, %s\n", r, fty, left.reg, right.reg);
-            if (node->op == '*') fprintf(out_fp, "  %%%d = fmul %s %s, %s\n", r, fty, left.reg, right.reg);
-            if (node->op == '/') fprintf(out_fp, "  %%%d = fdiv %s %s, %s\n", r, fty, left.reg, right.reg);
-            if (node->op == TK_LT || node->op == TK_GT || node->op == TK_LE || node->op == TK_GE ||
-                node->op == TK_EQ || node->op == TK_NE) {
-                const char *op = (node->op == TK_LT) ? "olt" :
-                                 (node->op == TK_LE) ? "ole" :
-                                 (node->op == TK_GT) ? "ogt" :
-                                 (node->op == TK_GE) ? "oge" :
-                                 (node->op == TK_EQ) ? "oeq" : "one";
-                fprintf(out_fp, "  %%%d = fcmp %s %s %s, %s\n", r, op, fty, left.reg, right.reg);
-            }
-        } else {
-            const char *ity = llvm_type(ct);
-            int uns = is_unsigned(ct);
-            if (node->op == '+') fprintf(out_fp, "  %%%d = add %s %s, %s\n", r, ity, left.reg, right.reg);
-            if (node->op == '-') fprintf(out_fp, "  %%%d = sub %s %s, %s\n", r, ity, left.reg, right.reg);
-            if (node->op == '*') fprintf(out_fp, "  %%%d = mul %s %s, %s\n", r, ity, left.reg, right.reg);
-            if (node->op == '/') fprintf(out_fp, "  %%%d = %s %s %s, %s\n", r, uns ? "udiv" : "sdiv", ity, left.reg, right.reg);
-            if (node->op == TK_MOD) fprintf(out_fp, "  %%%d = %s %s %s, %s\n", r, uns ? "urem" : "srem", ity, left.reg, right.reg);
-            if (node->op == TK_LT) fprintf(out_fp, "  %%%d = icmp %s %s %s, %s\n", r, uns ? "ult" : "slt", ity, left.reg, right.reg);
-            if (node->op == TK_GT) fprintf(out_fp, "  %%%d = icmp %s %s %s, %s\n", r, uns ? "ugt" : "sgt", ity, left.reg, right.reg);
-            if (node->op == TK_LE) fprintf(out_fp, "  %%%d = icmp %s %s %s, %s\n", r, uns ? "ule" : "sle", ity, left.reg, right.reg);
-            if (node->op == TK_GE) fprintf(out_fp, "  %%%d = icmp %s %s %s, %s\n", r, uns ? "uge" : "sge", ity, left.reg, right.reg);
-            if (node->op == TK_EQ) fprintf(out_fp, "  %%%d = icmp eq %s %s, %s\n", r, ity, left.reg, right.reg);
-            if (node->op == TK_NE) fprintf(out_fp, "  %%%d = icmp ne %s %s, %s\n", r, ity, left.reg, right.reg);
-        }
-        free(left.reg);
-        free(right.reg);
-        char *res = malloc(64);
-        sprintf(res, "%%%d", r);
-        if (node->op == TK_LT || node->op == TK_GT || node->op == TK_LE || node->op == TK_GE ||
-            node->op == TK_EQ || node->op == TK_NE) {
-            return value_from_raw(res, VT_I1, TY_INT);
-        }
-        return value_from_ctype(res, ct);
-    } else if (node->type == AST_UNARY) {
-        if (node->op == TK_NOT) {
-            Value val = gen_cond(node->left);
-            int r = reg_cnt++;
-            fprintf(out_fp, "  %%%d = xor i1 %s, 1\n", r, val.reg);
-            free(val.reg);
-            char *res = malloc(64);
-            sprintf(res, "%%%d", r);
-            return value_from_raw(res, VT_I1, TY_INT);
-        } else if (node->op == TK_MINUS || node->op == TK_PLUS) {
-            Value val = cast_value(gen_expr(node->left), node->ty);
-            if (node->op == TK_PLUS) {
-                return val;
-            }
-            int r = reg_cnt++;
-            if (is_float(node->ty)) {
-                const char *fty = (node->ty == TY_DOUBLE) ? "double" : "float";
-                fprintf(out_fp, "  %%%d = fsub %s 0.0, %s\n", r, fty, val.reg);
-            } else {
-                const char *ity = llvm_type(node->ty);
-                fprintf(out_fp, "  %%%d = sub %s 0, %s\n", r, ity, val.reg);
-            }
-            free(val.reg);
-            char *res = malloc(64);
-            sprintf(res, "%%%d", r);
-            return value_from_ctype(res, node->ty);
-        }
-    } else if (node->type == AST_CAST) {
-        Value val = gen_expr(node->left);
-        if (is_ptr(node->ty)) {
-            if (!is_ptr(val.cty)) error("不支援指標轉型");
-            return value_from_raw(val.reg, VT_PTR, node->ty);
-        }
-        return cast_value(val, node->ty);
-    } else if (node->type == AST_SIZEOF) {
-        char *res = malloc(64);
-        sprintf(res, "%d", node->val);
-        return value_from_ctype(res, TY_INT);
-    } else if (node->type == AST_INCDEC) {
-        int is_inc = (node->op == TK_PLUSPLUS);
-        Value addr = gen_lvalue_addr(node->left);
-        const char *ty = llvm_type(node->ty);
-        int r_old = reg_cnt++;
-        fprintf(out_fp, "  %%%d = load %s, ptr %s\n", r_old, ty, addr.reg);
-        char *old_reg = malloc(64);
-        sprintf(old_reg, "%%%d", r_old);
-        Value old_val = value_from_ctype(old_reg, node->ty);
-        int r_new = reg_cnt++;
-        if (is_float(node->ty)) {
-            const char *fty = (node->ty == TY_DOUBLE) ? "double" : "float";
-            fprintf(out_fp, "  %%%d = %s %s %s, 1.0\n", r_new, is_inc ? "fadd" : "fsub", fty, old_val.reg);
-        } else {
-            fprintf(out_fp, "  %%%d = %s %s %s, 1\n", r_new, is_inc ? "add" : "sub", ty, old_val.reg);
-        }
-        char *new_reg = malloc(64);
-        sprintf(new_reg, "%%%d", r_new);
-        Value new_val = value_from_ctype(new_reg, node->ty);
-        fprintf(out_fp, "  store %s %s, ptr %s\n", ty, new_val.reg, addr.reg);
-        free(addr.reg);
-        if (node->is_prefix) {
-            return value_from_ctype(new_val.reg, node->ty);
-        }
-        free(new_val.reg);
-        return value_from_ctype(old_val.reg, node->ty);
-    }
-    error("未知的表達式");
-    return value_from_raw(NULL, VT_I32, TY_INT);
-}
-
-static Value gen_cond(ASTNode *node) {
-    Value val = gen_expr(node);
-    if (val.vt == VT_I1) return val;
-    return to_i1(val);
-}
-
-static void gen_stmt(ASTNode *node) {
-    while (node) {
-        if (node->type == AST_DECL) {
-            const char *llvm_ty = llvm_type(node->ty);
-            char ir_name[64];
-            snprintf(ir_name, sizeof(ir_name), "v%d", var_id++);
-            var_add(node->name, ir_name, node->ty, node->array_len, node->struct_id, 0);
-            if (node->array_len > 0) {
-                if (base_of(node->ty) == TY_STRUCT) {
-                    int total = node->array_len * struct_size(node->struct_id);
-                    fprintf(out_fp, "  %%%s = alloca [%d x i8]\n", ir_name, total);
-                    if (node->init_kind != 0) error("不支援 struct 陣列初始化");
-                } else {
-                    fprintf(out_fp, "  %%%s = alloca [%d x %s]\n", ir_name, node->array_len, llvm_elem_type(node->ty));
-                    if (node->init_kind == 2) {
-                        int idx = 0;
-                        ASTNode *cur = node->left;
-                        while (cur && idx < node->array_len) {
-                        Value val = gen_expr(cur);
-                        Value store_val = cast_value(val, base_of(node->ty));
-                            int r = reg_cnt++;
-                            fprintf(out_fp, "  %%%d = getelementptr [%d x %s], ptr %%%s, i32 0, i32 %d\n",
-                                    r, node->array_len, llvm_elem_type(node->ty), ir_name, idx);
-                            fprintf(out_fp, "  store %s %s, ptr %%%d\n",
-                                    llvm_elem_type(node->ty), store_val.reg, r);
-                            free(store_val.reg);
-                            cur = cur->next;
-                            idx++;
-                        }
-                        for (int i = idx; i < node->array_len; i++) {
-                            int r = reg_cnt++;
-                            fprintf(out_fp, "  %%%d = getelementptr [%d x %s], ptr %%%s, i32 0, i32 %d\n",
-                                    r, node->array_len, llvm_elem_type(node->ty), ir_name, i);
-                            fprintf(out_fp, "  store %s 0, ptr %%%d\n", llvm_elem_type(node->ty), r);
-                        }
-                    } else if (node->init_kind == 3) {
-                        int len = (int)strlen(node->str_val);
-                        int limit = node->array_len;
-                        for (int i = 0; i < limit; i++) {
-                            int ch = (i < len) ? (unsigned char)node->str_val[i] : 0;
-                            if (i == len) ch = 0;
-                            int r = reg_cnt++;
-                            fprintf(out_fp, "  %%%d = getelementptr [%d x i8], ptr %%%s, i32 0, i32 %d\n",
-                                    r, node->array_len, ir_name, i);
-                            fprintf(out_fp, "  store i8 %d, ptr %%%d\n", ch, r);
-                        }
-                    }
-                }
-            } else if (node->ty == TY_STRUCT) {
-                int sz = struct_size(node->struct_id);
-                fprintf(out_fp, "  %%%s = alloca [%d x i8]\n", ir_name, sz);
-            } else if (is_param(current_params, node->name)) {
-                if (node->ty == TY_STRUCT) error("不支援 struct 參數");
-                fprintf(out_fp, "  %%%s = alloca %s\n", ir_name, llvm_ty);
-                fprintf(out_fp, "  store %s %%%s, ptr %%%s\n", llvm_ty, node->name, ir_name);
-            } else {
-                fprintf(out_fp, "  %%%s = alloca %s\n", ir_name, llvm_ty);
-                if (node->left) {
-                    Value val = gen_expr(node->left);
-                    Value store_val;
-                    if (is_ptr(node->ty)) store_val = val;
-                    else store_val = cast_value(val, node->ty);
-                    fprintf(out_fp, "  store %s %s, ptr %%%s\n", llvm_ty, store_val.reg, ir_name);
-                    free(store_val.reg);
-                }
-            }
-        } else if (node->type == AST_ASSIGN) {
-            const char *llvm_ty = llvm_type(node->ty);
-            if (node->ty == TY_STRUCT) error("不支援 struct 賦值");
-            Value addr = gen_lvalue_addr(node->left);
-            if (node->op == TK_ASSIGN) {
-                Value val = gen_expr(node->right);
-                Value store_val;
-                if (is_ptr(node->ty)) store_val = val;
-                else store_val = cast_value(val, node->ty);
-                fprintf(out_fp, "  store %s %s, ptr %s\n", llvm_ty, store_val.reg, addr.reg);
-                free(store_val.reg);
-            } else {
-                if (is_ptr(node->ty)) error("指標不支援複合指定");
-                int r_old = reg_cnt++;
-                fprintf(out_fp, "  %%%d = load %s, ptr %s\n", r_old, llvm_ty, addr.reg);
-                char *old_reg = malloc(64);
-                sprintf(old_reg, "%%%d", r_old);
-                Value old_val = value_from_ctype(old_reg, node->ty);
-                Value rhs = cast_value(gen_expr(node->right), node->ty);
-                int r_new = reg_cnt++;
-                if (is_float(node->ty)) {
-                    const char *fty = (node->ty == TY_DOUBLE) ? "double" : "float";
-                    if (node->op == TK_PLUSEQ) fprintf(out_fp, "  %%%d = fadd %s %s, %s\n", r_new, fty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_MINUSEQ) fprintf(out_fp, "  %%%d = fsub %s %s, %s\n", r_new, fty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_MULEQ) fprintf(out_fp, "  %%%d = fmul %s %s, %s\n", r_new, fty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_DIVEQ) fprintf(out_fp, "  %%%d = fdiv %s %s, %s\n", r_new, fty, old_val.reg, rhs.reg);
-                    else error("float 不支援此複合指定");
-                } else {
-                    if (node->op == TK_PLUSEQ) fprintf(out_fp, "  %%%d = add %s %s, %s\n", r_new, llvm_ty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_MINUSEQ) fprintf(out_fp, "  %%%d = sub %s %s, %s\n", r_new, llvm_ty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_MULEQ) fprintf(out_fp, "  %%%d = mul %s %s, %s\n", r_new, llvm_ty, old_val.reg, rhs.reg);
-                    else if (node->op == TK_DIVEQ) {
-                        fprintf(out_fp, "  %%%d = %s %s %s, %s\n", r_new, is_unsigned(node->ty) ? "udiv" : "sdiv", llvm_ty, old_val.reg, rhs.reg);
-                    } else if (node->op == TK_MODEQ) {
-                        fprintf(out_fp, "  %%%d = %s %s %s, %s\n", r_new, is_unsigned(node->ty) ? "urem" : "srem", llvm_ty, old_val.reg, rhs.reg);
-                    } else {
-                        error("不支援的複合指定");
-                    }
-                }
-                free(old_val.reg);
-                free(rhs.reg);
-                char *new_reg = malloc(64);
-                sprintf(new_reg, "%%%d", r_new);
-                Value new_val = value_from_ctype(new_reg, node->ty);
-                fprintf(out_fp, "  store %s %s, ptr %s\n", llvm_ty, new_val.reg, addr.reg);
-                free(new_val.reg);
-            }
-            free(addr.reg);
-        } else if (node->type == AST_EXPR_STMT) {
-            if (node->left) {
-                Value val = gen_expr(node->left);
-                if (val.reg) free(val.reg);
-            }
-        } else if (node->type == AST_BLOCK) {
-            var_push_scope();
-            gen_stmt(node->left);
-            var_pop_scope();
-        } else if (node->type == AST_IF) {
-            Value cond_val = gen_cond(node->cond);
-            int then_fall = stmt_list_may_fallthrough(node->then_body);
-            int else_fall = node->else_body ? stmt_list_may_fallthrough(node->else_body) : 1;
-            int need_end = then_fall || else_fall;
-            int then_label = label_cnt++;
-            int else_label = node->else_body ? label_cnt++ : (need_end ? label_cnt++ : label_cnt++);
-            int end_label = need_end ? label_cnt++ : -1;
-            if (!node->else_body) else_label = end_label;
-
-            fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", cond_val.reg, then_label, else_label);
-            free(cond_val.reg);
-
-            fprintf(out_fp, "L%d:\n", then_label);
-            gen_stmt(node->then_body);
-            if (then_fall && need_end) {
-                fprintf(out_fp, "  br label %%L%d\n", end_label);
-            }
-
-            if (node->else_body) {
-                fprintf(out_fp, "L%d:\n", else_label);
-                gen_stmt(node->else_body);
-                if (else_fall && need_end) {
-                    fprintf(out_fp, "  br label %%L%d\n", end_label);
-                }
-            }
-
-            if (need_end) {
-                fprintf(out_fp, "L%d:\n", end_label);
-            }
-        } else if (node->type == AST_WHILE) {
-            int cond_label = label_cnt++;
-            int body_label = label_cnt++;
-            int end_label = label_cnt++;
-            fprintf(out_fp, "  br label %%L%d\n", cond_label);
-
-            fprintf(out_fp, "L%d:\n", cond_label);
-            Value cond_val = gen_cond(node->cond);
-            fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", cond_val.reg, body_label, end_label);
-            free(cond_val.reg);
-
-            fprintf(out_fp, "L%d:\n", body_label);
-            break_label_stack[loop_depth] = end_label;
-            continue_label_stack[loop_depth] = cond_label;
-            loop_depth++;
-            gen_stmt(node->body);
-            if (stmt_list_may_fallthrough(node->body)) {
-                fprintf(out_fp, "  br label %%L%d\n", cond_label);
-            }
-            loop_depth--;
-
-            fprintf(out_fp, "L%d:\n", end_label);
-        } else if (node->type == AST_FOR) {
-            if (node->init) {
-                if (node->init->type == AST_DECL) gen_stmt(node->init);
-                else if (node->init->type == AST_ASSIGN) gen_stmt(node->init);
-                else if (node->init->type == AST_EXPR_STMT) {
-                    Value val = gen_expr(node->init->left);
-                    if (val.reg) free(val.reg);
-                }
-            }
-
-            int cond_label = label_cnt++;
-            int body_label = label_cnt++;
-            int update_label = label_cnt++;
-            int end_label = label_cnt++;
-
-            fprintf(out_fp, "  br label %%L%d\n", cond_label);
-
-            fprintf(out_fp, "L%d:\n", cond_label);
-            if (node->cond) {
-                Value cond_val = gen_cond(node->cond);
-                fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", cond_val.reg, body_label, end_label);
-                free(cond_val.reg);
-            } else {
-                fprintf(out_fp, "  br label %%L%d\n", body_label);
-            }
-
-            fprintf(out_fp, "L%d:\n", body_label);
-            break_label_stack[loop_depth] = end_label;
-            continue_label_stack[loop_depth] = update_label;
-            loop_depth++;
-            gen_stmt(node->body);
-            if (stmt_list_may_fallthrough(node->body)) {
-                fprintf(out_fp, "  br label %%L%d\n", update_label);
-            }
-            loop_depth--;
-
-            fprintf(out_fp, "L%d:\n", update_label);
-            if (node->update) {
-                if (node->update->type == AST_ASSIGN) gen_stmt(node->update);
-                else {
-                    Value val = gen_expr(node->update);
-                    if (val.reg) free(val.reg);
-                }
-            }
-            fprintf(out_fp, "  br label %%L%d\n", cond_label);
-
-            fprintf(out_fp, "L%d:\n", end_label);
-        } else if (node->type == AST_DO) {
-            int body_label = label_cnt++;
-            int cond_label = label_cnt++;
-            int end_label = label_cnt++;
-
-            fprintf(out_fp, "  br label %%L%d\n", body_label);
-            fprintf(out_fp, "L%d:\n", body_label);
-            break_label_stack[loop_depth] = end_label;
-            continue_label_stack[loop_depth] = cond_label;
-            loop_depth++;
-            gen_stmt(node->body);
-            if (stmt_list_may_fallthrough(node->body)) {
-                fprintf(out_fp, "  br label %%L%d\n", cond_label);
-            }
-            loop_depth--;
-
-            fprintf(out_fp, "L%d:\n", cond_label);
-            Value cond_val = gen_cond(node->cond);
-            fprintf(out_fp, "  br i1 %s, label %%L%d, label %%L%d\n", cond_val.reg, body_label, end_label);
-            free(cond_val.reg);
-            fprintf(out_fp, "L%d:\n", end_label);
-        } else if (node->type == AST_SWITCH) {
-            Value cond_val = cast_value(gen_expr(node->cond), TY_INT);
-            int end_label = label_cnt++;
-            int case_count = 0;
-            for (ASTNode *c = node->left; c; c = c->next) case_count++;
-            int *case_labels = malloc(sizeof(int) * case_count);
-            int *case_is_default = malloc(sizeof(int) * case_count);
-            ASTNode **case_nodes = malloc(sizeof(ASTNode*) * case_count);
-            int default_label = -1;
-            int idx = 0;
-            for (ASTNode *c = node->left; c; c = c->next) {
-                case_labels[idx] = label_cnt++;
-                case_is_default[idx] = c->is_default;
-                if (c->is_default) default_label = case_labels[idx];
-                case_nodes[idx] = c;
-                idx++;
-            }
-
-            int first_check = label_cnt++;
-            fprintf(out_fp, "  br label %%L%d\n", first_check);
-
-            int check_label = first_check;
-            for (int i = 0; i < case_count; i++) {
-                if (case_is_default[i]) continue;
-                fprintf(out_fp, "L%d:\n", check_label);
-                int cmp = reg_cnt++;
-                fprintf(out_fp, "  %%%d = icmp eq i32 %s, %d\n", cmp, cond_val.reg, case_nodes[i]->val);
-                int next = label_cnt++;
-                fprintf(out_fp, "  br i1 %%%d, label %%L%d, label %%L%d\n", cmp, case_labels[i], next);
-                check_label = next;
-            }
-            fprintf(out_fp, "L%d:\n", check_label);
-            if (default_label >= 0) fprintf(out_fp, "  br label %%L%d\n", default_label);
-            else fprintf(out_fp, "  br label %%L%d\n", end_label);
-
-            switch_break_stack[switch_depth++] = end_label;
-            for (int i = 0; i < case_count; i++) {
-                fprintf(out_fp, "L%d:\n", case_labels[i]);
-                gen_stmt(case_nodes[i]->left);
-                if (stmt_list_may_fallthrough(case_nodes[i]->left)) {
-                    int next_label = (i + 1 < case_count) ? case_labels[i + 1] : end_label;
-                    fprintf(out_fp, "  br label %%L%d\n", next_label);
-                }
-            }
-            switch_depth--;
-            fprintf(out_fp, "L%d:\n", end_label);
-            free(cond_val.reg);
-            free(case_labels);
-            free(case_is_default);
-            free(case_nodes);
-        } else if (node->type == AST_BREAK) {
-            if (loop_depth > 0) {
-                fprintf(out_fp, "  br label %%L%d\n", break_label_stack[loop_depth - 1]);
-            } else if (switch_depth > 0) {
-                fprintf(out_fp, "  br label %%L%d\n", switch_break_stack[switch_depth - 1]);
-            } else {
-                error("break 不在迴圈或 switch 內");
-            }
-        } else if (node->type == AST_CONTINUE) {
-            if (loop_depth == 0) error("continue 不在迴圈內");
-            fprintf(out_fp, "  br label %%L%d\n", continue_label_stack[loop_depth - 1]);
-        } else if (node->type == AST_RETURN) {
-            if (node->left == NULL) {
-                fprintf(out_fp, "  ret void\n");
-            } else {
-                Value val = gen_expr(node->left);
-                Value ret_val;
-                if (is_ptr(current_ret_ty)) {
-                    ret_val = val;
-                } else {
-                    ret_val = cast_value(val, current_ret_ty);
-                }
-                fprintf(out_fp, "  ret %s %s\n", llvm_type(current_ret_ty), ret_val.reg);
-                free(ret_val.reg);
-            }
-        }
-        node = node->next;
-    }
-}
-
-void gen_llvm_ir(ASTNode *funcs, FILE *out) {
-    out_fp = out;
-    fprintf(out_fp, "; ModuleID = 'c0c'\n");
-    string_cnt = 0;
-    global_cnt = 0;
-    build_func_sigs(funcs);
-    emit_globals(funcs);
-    ASTNode *func = funcs;
-    while (func) {
-        if (func->type != AST_FUNC) { func = func->next; continue; }
-        const char *ret_ty = llvm_type(func->ty);
-        if (func->is_decl) {
-            if (func_has_def(funcs, func->name)) {
-                func = func->next;
-                continue;
-            }
-            fprintf(out_fp, "declare %s @%s(", ret_ty, func->name);
-        }
-        else fprintf(out_fp, "define %s @%s(", ret_ty, func->name);
-        ASTNode *param = func->left;
-        int first = 1;
-        while (param) {
-            if (!first) fprintf(out_fp, ", ");
-            fprintf(out_fp, "%s %%%s", llvm_type(param->ty), param->name);
-            first = 0;
-            param = param->next;
-        }
-        if (func->is_decl) {
-            fprintf(out_fp, ");\n\n");
-            func = func->next;
-            continue;
-        }
-        fprintf(out_fp, ") {\n");
-        fprintf(out_fp, "entry:\n");
-        reg_cnt = 0;
-        var_id = 0;
-        var_cnt = 0;
-        scope_depth = 0;
-        var_push_scope();
-        current_params = func->left;
-        current_ret_ty = func->ty;
-        ASTNode *pnode = current_params;
-        while (pnode) {
-            gen_stmt(pnode);
-            pnode = pnode->next;
-        }
-        gen_stmt(func->right);
-        if (current_ret_ty == TY_VOID && !stmt_list_ends_with_return(func->right)) {
-            fprintf(out_fp, "  ret void\n");
-        }
-        fprintf(out_fp, "}\n\n");
-        func = func->next;
     }
 
-    for (int i = 0; i < string_cnt; i++) {
-        char llvm_str[512] = {0};
-        int len = 0;
-        build_llvm_string(string_table[i], llvm_str, &len);
-        fprintf(out_fp, "@.str.%d = private unnamed_addr constant [%d x i8] c\"%s\", align 1\n", i, len, llvm_str);
+    /* ---- pass 1: collect extern/function declarations and globals ---- */
+    for (int i = 0; i < tu->n_children; i++) {
+        Node *child = tu->children[i];
+        if (!child) continue;
+        if (child->kind == ND_FUNC_DEF) {
+            /* register in globals table */
+            int found = 0;
+            for (int j = 0; j < cg->n_globals; j++)
+                if (strcmp(cg->globals[j].name, child->func_name ? child->func_name : "") == 0)
+                    { found = 1; break; }
+            if (!found && cg->n_globals < MAX_GLOBALS) {
+                cg->globals[cg->n_globals].name = strdup(child->func_name ? child->func_name : "__anon");
+                cg->globals[cg->n_globals].type = child->func_type;
+                cg->globals[cg->n_globals].is_extern = 0;
+                cg->n_globals++;
+            }
+        }
     }
 
-    fprintf(out_fp, "declare i32 @printf(ptr, ...)\n");
+    /* ---- pass 2: emit global variables ---- */
+    for (int i = 0; i < tu->n_children; i++) {
+        Node *child = tu->children[i];
+        if (!child) continue;
+        if (child->kind == ND_VAR_DECL)
+            emit_global_var(cg, child);
+    }
+    __c0c_emit(cg->out, "\n");
+
+    /* ---- pass 3: emit function definitions ---- */
+    for (int i = 0; i < tu->n_children; i++) {
+        Node *child = tu->children[i];
+        if (!child) continue;
+        if (child->kind == ND_FUNC_DEF)
+            emit_func_def(cg, child);
+    }
+
+    /* ---- pass 4: emit string literals ---- */
+    for (int i = 0; i < cg->n_strings; i++) {
+        int slen = str_literal_len(cg->str_literals[i]);
+        __c0c_emit(cg->out, "@.str%d = private unnamed_addr constant [%d x i8] c\"",
+             cg->str_ids[i], slen);
+        emit_str_content(cg, cg->str_literals[i]);
+        __c0c_emit(cg->out, "\"\n");
+    }
 }

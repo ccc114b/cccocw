@@ -13,7 +13,7 @@ main:                                   # @main
 	addi	s0, sp, 48
 	li	a0, 0
 	sw	a0, -20(s0)
-	li	a1, 2
+	li	a1, 3
 	sw	a1, -24(s0)
 	sw	a0, -28(s0)
 	lw	a0, -24(s0)
@@ -38,15 +38,15 @@ main:                                   # @main
 	sw	a0, -28(s0)
 	j	.LBB0_7
 .LBB0_4:
-	li	a0, 3
+	li	a0, 2
 	sw	a0, -28(s0)
 	j	.LBB0_7
 .LBB0_5:
-	li	a0, 5
+	li	a0, 4
 	sw	a0, -28(s0)
 	j	.LBB0_7
 .LBB0_6:
-	li	a0, 0
+	li	a0, 9
 	sw	a0, -28(s0)
 	j	.LBB0_7
 .LBB0_7:

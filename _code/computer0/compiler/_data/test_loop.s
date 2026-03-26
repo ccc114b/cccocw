@@ -20,20 +20,18 @@ main:                                   # @main
 .LBB0_1:                                # =>This Inner Loop Header: Depth=1
 	lw	a1, -28(s0)
 	li	a0, 10
-	blt	a0, a1, .LBB0_4
+	blt	a0, a1, .LBB0_3
 	j	.LBB0_2
 .LBB0_2:                                #   in Loop: Header=BB0_1 Depth=1
-	lw	a0, -24(s0)
 	lw	a1, -28(s0)
+	lw	a0, -24(s0)
 	addw	a0, a0, a1
 	sw	a0, -24(s0)
-	j	.LBB0_3
-.LBB0_3:                                #   in Loop: Header=BB0_1 Depth=1
 	lw	a0, -28(s0)
 	addiw	a0, a0, 1
 	sw	a0, -28(s0)
 	j	.LBB0_1
-.LBB0_4:
+.LBB0_3:
 	lw	a0, -24(s0)
 	ld	ra, 24(sp)                      # 8-byte Folded Reload
 	ld	s0, 16(sp)                      # 8-byte Folded Reload

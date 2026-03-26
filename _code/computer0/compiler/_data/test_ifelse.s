@@ -13,37 +13,30 @@ main:                                   # @main
 	addi	s0, sp, 32
 	li	a0, 0
 	sw	a0, -20(s0)
-	li	a1, 10
-	sw	a1, -24(s0)
-	sw	a0, -28(s0)
+	li	a0, 3
+	sw	a0, -24(s0)
 	lw	a0, -24(s0)
 	li	a1, 6
 	blt	a0, a1, .LBB0_2
 	j	.LBB0_1
 .LBB0_1:
-	lw	a0, -28(s0)
-	addiw	a0, a0, 1
-	sw	a0, -28(s0)
-	j	.LBB0_3
-.LBB0_2:
-	lw	a0, -28(s0)
-	addiw	a0, a0, 10
-	sw	a0, -28(s0)
-	j	.LBB0_3
-.LBB0_3:
-	lw	a1, -24(s0)
-	li	a0, 4
-	blt	a0, a1, .LBB0_5
-	j	.LBB0_4
-.LBB0_4:
-	lw	a0, -28(s0)
-	addiw	a0, a0, 10
+	li	a0, 1
 	sw	a0, -28(s0)
 	j	.LBB0_6
-.LBB0_5:
-	lw	a0, -28(s0)
-	addiw	a0, a0, 2
+.LBB0_2:
+	lw	a0, -24(s0)
+	li	a1, 3
+	blt	a0, a1, .LBB0_4
+	j	.LBB0_3
+.LBB0_3:
+	li	a0, 7
 	sw	a0, -28(s0)
+	j	.LBB0_5
+.LBB0_4:
+	li	a0, 9
+	sw	a0, -28(s0)
+	j	.LBB0_5
+.LBB0_5:
 	j	.LBB0_6
 .LBB0_6:
 	lw	a0, -28(s0)
