@@ -1,0 +1,3 @@
+/Users/Shared/ccc/ccc114b/cccocw/系統程式/03-組合語言/factorial_debug:	file format Mach-O arm64
+
+.debug_info contents:

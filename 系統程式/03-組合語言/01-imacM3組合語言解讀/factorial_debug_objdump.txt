@@ -1,0 +1,60 @@
+
+factorial_debug:	file format mach-o arm64
+
+Disassembly of section __TEXT,__text:
+
+0000000100003ed4 <_factorial>:
+100003ed4: d10083ff    	sub	sp, sp, #0x20
+100003ed8: a9017bfd    	stp	x29, x30, [sp, #0x10]
+100003edc: 910043fd    	add	x29, sp, #0x10
+100003ee0: b9000be0    	str	w0, [sp, #0x8]
+100003ee4: b9400be8    	ldr	w8, [sp, #0x8]
+100003ee8: 71000508    	subs	w8, w8, #0x1
+100003eec: 1a9fd7e8    	cset	w8, gt
+100003ef0: 370000a8    	tbnz	w8, #0x0, 0x100003f04 <_factorial+0x30>
+100003ef4: 14000001    	b	0x100003ef8 <_factorial+0x24>
+100003ef8: 52800028    	mov	w8, #0x1                ; =1
+100003efc: b81fc3a8    	stur	w8, [x29, #-0x4]
+100003f00: 1400000a    	b	0x100003f28 <_factorial+0x54>
+100003f04: b9400be8    	ldr	w8, [sp, #0x8]
+100003f08: b90007e8    	str	w8, [sp, #0x4]
+100003f0c: b9400be8    	ldr	w8, [sp, #0x8]
+100003f10: 71000500    	subs	w0, w8, #0x1
+100003f14: 97fffff0    	bl	0x100003ed4 <_factorial>
+100003f18: b94007e8    	ldr	w8, [sp, #0x4]
+100003f1c: 1b007d08    	mul	w8, w8, w0
+100003f20: b81fc3a8    	stur	w8, [x29, #-0x4]
+100003f24: 14000001    	b	0x100003f28 <_factorial+0x54>
+100003f28: b85fc3a0    	ldur	w0, [x29, #-0x4]
+100003f2c: a9417bfd    	ldp	x29, x30, [sp, #0x10]
+100003f30: 910083ff    	add	sp, sp, #0x20
+100003f34: d65f03c0    	ret
+
+0000000100003f38 <_main>:
+100003f38: d100c3ff    	sub	sp, sp, #0x30
+100003f3c: a9027bfd    	stp	x29, x30, [sp, #0x20]
+100003f40: 910083fd    	add	x29, sp, #0x20
+100003f44: 52800008    	mov	w8, #0x0                ; =0
+100003f48: b81f43a8    	stur	w8, [x29, #-0xc]
+100003f4c: b81fc3bf    	stur	wzr, [x29, #-0x4]
+100003f50: 528000a0    	mov	w0, #0x5                ; =5
+100003f54: 97ffffe0    	bl	0x100003ed4 <_factorial>
+100003f58: b81f83a0    	stur	w0, [x29, #-0x8]
+100003f5c: b85f83a9    	ldur	w9, [x29, #-0x8]
+100003f60: aa0903e8    	mov	x8, x9
+100003f64: 910003e9    	mov	x9, sp
+100003f68: f9000128    	str	x8, [x9]
+100003f6c: 90000000    	adrp	x0, 0x100003000 <_printf+0x100003000>
+100003f70: 913e5000    	add	x0, x0, #0xf94
+100003f74: 94000005    	bl	0x100003f88 <_printf+0x100003f88>
+100003f78: b85f43a0    	ldur	w0, [x29, #-0xc]
+100003f7c: a9427bfd    	ldp	x29, x30, [sp, #0x20]
+100003f80: 9100c3ff    	add	sp, sp, #0x30
+100003f84: d65f03c0    	ret
+
+Disassembly of section __TEXT,__stubs:
+
+0000000100003f88 <__stubs>:
+100003f88: b0000010    	adrp	x16, 0x100004000 <_printf+0x100004000>
+100003f8c: f9400210    	ldr	x16, [x16]
+100003f90: d61f0200    	br	x16

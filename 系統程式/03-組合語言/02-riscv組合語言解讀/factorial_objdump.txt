@@ -1,0 +1,61 @@
+
+factorial.o:     file format elf64-littleriscv
+
+
+Disassembly of section .text:
+
+0000000000000000 <factorial>:
+   0:	1101                	add	sp,sp,-32
+   2:	ec06                	sd	ra,24(sp)
+   4:	e822                	sd	s0,16(sp)
+   6:	1000                	add	s0,sp,32
+   8:	87aa                	mv	a5,a0
+   a:	fef42623          	sw	a5,-20(s0)
+   e:	fec42783          	lw	a5,-20(s0)
+  12:	0007871b          	sext.w	a4,a5
+  16:	4785                	li	a5,1
+  18:	00e7c463          	blt	a5,a4,20 <.L2>
+  1c:	4785                	li	a5,1
+  1e:	a005                	j	3e <.L3>
+
+0000000000000020 <.L2>:
+  20:	fec42783          	lw	a5,-20(s0)
+  24:	37fd                	addw	a5,a5,-1
+  26:	2781                	sext.w	a5,a5
+  28:	853e                	mv	a0,a5
+  2a:	00000097          	auipc	ra,0x0
+  2e:	000080e7          	jalr	ra # 2a <.L2+0xa>
+  32:	87aa                	mv	a5,a0
+  34:	fec42703          	lw	a4,-20(s0)
+  38:	02f707bb          	mulw	a5,a4,a5
+  3c:	2781                	sext.w	a5,a5
+
+000000000000003e <.L3>:
+  3e:	853e                	mv	a0,a5
+  40:	60e2                	ld	ra,24(sp)
+  42:	6442                	ld	s0,16(sp)
+  44:	6105                	add	sp,sp,32
+  46:	8082                	ret
+
+0000000000000048 <main>:
+  48:	1101                	add	sp,sp,-32
+  4a:	ec06                	sd	ra,24(sp)
+  4c:	e822                	sd	s0,16(sp)
+  4e:	1000                	add	s0,sp,32
+  50:	4515                	li	a0,5
+  52:	00000097          	auipc	ra,0x0
+  56:	000080e7          	jalr	ra # 52 <main+0xa>
+  5a:	87aa                	mv	a5,a0
+  5c:	fef42623          	sw	a5,-20(s0)
+  60:	fec42783          	lw	a5,-20(s0)
+  64:	85be                	mv	a1,a5
+  66:	000007b7          	lui	a5,0x0
+  6a:	00078513          	mv	a0,a5
+  6e:	00000097          	auipc	ra,0x0
+  72:	000080e7          	jalr	ra # 6e <main+0x26>
+  76:	4781                	li	a5,0
+  78:	853e                	mv	a0,a5
+  7a:	60e2                	ld	ra,24(sp)
+  7c:	6442                	ld	s0,16(sp)
+  7e:	6105                	add	sp,sp,32
+  80:	8082                	ret
