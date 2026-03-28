@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQLite TODO 應用</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 50px 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        .add-form {
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+            display: flex;
+            gap: 10px;
+        }
+        .add-form input {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+        .add-form input:focus {
+            border-color: #667eea;
+        }
+        .add-form button {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .add-form button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        .todo-list {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .todo-item {
+            padding: 20px;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transition: background 0.2s;
+        }
+        .todo-item:last-child {
+            border-bottom: none;
+        }
+        .todo-item:hover {
+            background: #f9f9f9;
+        }
+        .todo-item.completed .task-text {
+            text-decoration: line-through;
+            color: #999;
+        }
+        .checkbox {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            accent-color: #667eea;
+        }
+        .task-text {
+            flex: 1;
+            font-size: 18px;
+            color: #333;
+            transition: color 0.3s;
+        }
+        .delete-btn {
+            padding: 8px 16px;
+            background: #ff4757;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s, transform 0.2s;
+        }
+        .delete-btn:hover {
+            background: #ff6b7a;
+            transform: scale(1.05);
+        }
+        .empty {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📝 TODO 列表</h1>
+        
+        <form class="add-form" action="/add" method="POST">
+            <input type="text" name="task" placeholder="請輸入新的任務..." required>
+            <button type="submit">新增</button>
+        </form>
+        
+        <div class="todo-list">
+            {% if todos %}
+                {% for todo in todos %}
+                <div class="todo-item {% if todo[2] %}completed{% endif %}">
+                    <a href="/toggle/{{ todo[0] }}">
+                        <input type="checkbox" class="checkbox" {% if todo[2] %}checked{% endif %}>
+                    </a>
+                    <span class="task-text">{{ todo[1] }}</span>
+                    <a href="/delete/{{ todo[0] }}">
+                        <button class="delete-btn">刪除</button>
+                    </a>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty">目前沒有任務，新增一個吧！</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

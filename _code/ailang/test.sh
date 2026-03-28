@@ -1,4 +1,4 @@
 #!/bin/bash
 source ~/.zshrc
-# PYTHONPATH=src python examples/basic.py
-PYTHONPATH=src python examples/ai_features.py
+# PYTHONPATH=src python examples/travel_planner.py
+PYTHONPATH=src python minicode_ail.py

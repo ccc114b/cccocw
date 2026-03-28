@@ -6,7 +6,7 @@ AIL (AI Language) - 為 AI 設計的 Python 擴充套件
 from .core import intent, agent, tool, remember, recall, maybe, Uncertain, Agent
 from .memory import Memory
 from .vector import Vector, cosine_similarity
-from .llm import init_minimax, init_openrouter, chat, MiniMaxClient
+from .llm import init_minimax, init_openrouter, init_ollama, chat, MiniMaxClient, OllamaClient, OllamaAgent
 from .explore import explore, explore_all, Explorer, VoteStrategy, ExplorationResult
 from .think import think, ThinkStream, Thought, ThoughtType, Reasoner
 from .goal import goal, GoalContext, GoalTracker, Goal, GoalStatus, Priority, get_tracker
@@ -29,8 +29,11 @@ __all__ = [
     # LLM
     "init_minimax",
     "init_openrouter",
+    "init_ollama",
     "chat",
     "MiniMaxClient",
+    "OllamaClient",
+    "OllamaAgent",
     # Explore
     "explore",
     "explore_all",

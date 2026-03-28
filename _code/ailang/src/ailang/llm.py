@@ -1,5 +1,5 @@
 """
-AIL LLM - MiniMax M2.5 整合模組
+AIL LLM - LLM 整合模組 (支援 Ollama, MiniMax, OpenRouter)
 """
 
 import os
@@ -13,6 +13,91 @@ class ChatMessage:
     """聊天訊息"""
     role: str
     content: str
+
+
+class OllamaClient:
+    """
+    Ollama 本地/雲端模型客戶端 (使用 CLI)
+    
+    用法:
+        client = OllamaClient(model="minimax-m2.5:cloud")
+        result = await client.chat("你好，請自我介紹")
+    """
+    
+    def __init__(
+        self,
+        model: str = "minimax-m2.5:cloud"
+    ):
+        self.model = model
+    
+    async def chat(
+        self,
+        message: str,
+        system_prompt: str = "You are a helpful AI assistant.",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        history: List[ChatMessage] = None
+    ) -> str:
+        """使用 subprocess 發送請求"""
+        import subprocess
+        import asyncio
+        
+        full_prompt = f"{system_prompt}\n\n"
+        if history:
+            for msg in history:
+                full_prompt += f"{msg.role}: {msg.content}\n"
+        full_prompt += f"user: {message}"
+        
+        proc = await asyncio.create_subprocess_exec(
+            "ollama", "run", self.model,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate(input=full_prompt.encode())
+        
+        if proc.returncode != 0:
+            raise Exception(f"Ollama Error: {stderr.decode()}")
+        
+        result = stdout.decode()
+        import re
+        result = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result)
+        return result.strip()
+    
+    async def chat_stream(
+        self,
+        message: str,
+        system_prompt: str = "You are a helpful AI assistant.",
+        temperature: float = 0.7,
+        max_tokens: int = 1024
+    ) -> AsyncGenerator[str, None]:
+        """流式聊天 (非同步輸出)"""
+        import subprocess
+        import asyncio
+        
+        proc = await asyncio.create_subprocess_exec(
+            "ollama", "run", self.model,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        await proc.stdin.write(f"{system_prompt}\n\nuser: {message}".encode())
+        await proc.stdin.drain()
+        await proc.stdin.close()
+        
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode()
+            import re
+            text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+            if text.strip():
+                yield text
+        
+        await proc.wait()
 
 
 class MiniMaxClient:
@@ -171,6 +256,52 @@ class MiniMaxClient:
                                     yield delta["content"]
 
 
+class OllamaAgent:
+    """
+    使用 Ollama 本地模型的 Agent
+    
+    用法:
+        agent = OllamaAgent("assistant")
+        result = await agent("你好，請自我介紹")
+    """
+    
+    def __init__(
+        self,
+        name: str,
+        model: str = "jaahas/qwen3.5-uncensored:4b",
+        system_prompt: str = None,
+        client: OllamaClient = None
+    ):
+        self.name = name
+        self.client = client or get_ollama_client() or OllamaClient(model=model)
+        self.system_prompt = system_prompt or f"You are {name}, a helpful AI assistant."
+        self._history: List[ChatMessage] = []
+    
+    async def __call__(self, task: str, **kwargs) -> str:
+        """執行任務"""
+        prompt = task
+        if kwargs:
+            context = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+            prompt = f"{task}\nContext: {context}"
+        
+        result = await self.client.chat(
+            message=prompt,
+            system_prompt=self.system_prompt,
+            history=self._history
+        )
+        
+        self._history.append(ChatMessage(role="user", content=task))
+        self._history.append(ChatMessage(role="assistant", content=result))
+        
+        return result
+    
+    def history(self) -> List[Dict]:
+        return [{"role": m.role, "content": m.content} for m in self._history]
+    
+    def clear_history(self) -> None:
+        self._history.clear()
+
+
 class MiniMaxAgent:
     """
     使用 MiniMax M2.5 的 Agent
@@ -189,8 +320,8 @@ class MiniMaxAgent:
         client: MiniMaxClient = None
     ):
         self.name = name
-        # 優先使用傳入的 client，其次使用全域 client
-        self.client = client or get_client() or MiniMaxClient(api_key=api_key, model=model)
+        # 優先使用傳入的 client，其次使用 Ollama，其次使用 MiniMax
+        self.client = client or get_ollama_client() or get_client() or MiniMaxClient(api_key=api_key, model=model)
         self.system_prompt = system_prompt or f"You are {name}, a helpful AI assistant."
         self._history: List[ChatMessage] = []
     
@@ -226,6 +357,13 @@ class MiniMaxAgent:
 
 # 全域客戶端
 _default_client: Optional[MiniMaxClient] = None
+_ollama_client: Optional[OllamaClient] = None
+
+
+def init_ollama(model: str = "minimax-m2.5:cloud"):
+    """初始化 Ollama 本地/雲端模型"""
+    global _ollama_client
+    _ollama_client = OllamaClient(model=model)
 
 
 def init_minimax(api_key: str = None, base_url: str = None, model: str = "MiniMax-M2.5", group_id: str = None):
@@ -259,8 +397,15 @@ def get_client() -> Optional[MiniMaxClient]:
     return _default_client
 
 
+def get_ollama_client() -> Optional[OllamaClient]:
+    """取得 Ollama 客戶端"""
+    return _ollama_client
+
+
 async def chat(message: str, **kwargs) -> str:
     """快速聊天"""
+    if _ollama_client:
+        return await _ollama_client.chat(message, **kwargs)
     if not _default_client:
-        raise ValueError("請先調用 init_minimax(api_key) 初始化")
+        raise ValueError("請先調用 init_ollama() 或 init_minimax(api_key) 初始化")
     return await _default_client.chat(message, **kwargs)
