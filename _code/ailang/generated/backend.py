@@ -1,59 +1,69 @@
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, jsonify
 import sqlite3
 
 app = Flask(__name__)
 
 def init_db():
     conn = sqlite3.connect('todo.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS todos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task TEXT NOT NULL,
-                    completed INTEGER DEFAULT 0
-                )''')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            completed INTEGER DEFAULT 0
+        )
+    ''')
     conn.commit()
     conn.close()
+
+def get_db_connection():
+    conn = sqlite3.connect('todo.db')
+    conn.row_factory = sqlite3.Row
+    return conn
 
 @app.route('/')
 def index():
-    conn = sqlite3.connect('todo.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM todos ORDER BY id DESC')
-    todos = c.fetchall()
+    return render_template('index.html')
+
+@app.route('/api/todos', methods=['GET'])
+def get_todos():
+    conn = get_db_connection()
+    todos = conn.execute('SELECT * FROM todos').fetchall()
     conn.close()
-    return render_template('index.html', todos=todos)
+    return jsonify([dict(row) for row in todos])
 
-@app.route('/add', methods=['POST'])
-def add():
-    task = request.form.get('task')
-    if task:
-        conn = sqlite3.connect('todo.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO todos (task) VALUES (?)', (task,))
-        conn.commit()
-        conn.close()
-    return redirect(url_for('index'))
+@app.route('/api/todos', methods=['POST'])
+def add_todo():
+    data = request.get_json()
+    title = data.get('title', '')
+    if not title:
+        return jsonify({'error': 'Title is required'}), 400
+    
+    conn = get_db_connection()
+    cursor = conn.execute('INSERT INTO todos (title) VALUES (?)', (title,))
+    conn.commit()
+    todo_id = cursor.lastrowid
+    conn.close()
+    return jsonify({'id': todo_id, 'title': title, 'completed': 0})
 
-@app.route('/delete/<int:todo_id>')
-def delete(todo_id):
-    conn = sqlite3.connect('todo.db')
-    c = conn.cursor()
-    c.execute('DELETE FROM todos WHERE id = ?', (todo_id,))
+@app.route('/api/todos/<int:todo_id>', methods=['PUT'])
+def update_todo(todo_id):
+    data = request.get_json()
+    completed = data.get('completed', 0)
+    
+    conn = get_db_connection()
+    conn.execute('UPDATE todos SET completed = ? WHERE id = ?', (completed, todo_id))
     conn.commit()
     conn.close()
-    return redirect(url_for('index'))
+    return jsonify({'id': todo_id, 'completed': completed})
 
-@app.route('/toggle/<int:todo_id>')
-def toggle(todo_id):
-    conn = sqlite3.connect('todo.db')
-    c = conn.cursor()
-    c.execute('SELECT completed FROM todos WHERE id = ?', (todo_id,))
-    current = c.fetchone()[0]
-    new_status = 0 if current == 1 else 1
-    c.execute('UPDATE todos SET completed = ? WHERE id = ?', (new_status, todo_id))
+@app.route('/api/todos/<int:todo_id>', methods=['DELETE'])
+def delete_todo(todo_id):
+    conn = get_db_connection()
+    conn.execute('DELETE FROM todos WHERE id = ?', (todo_id,))
     conn.commit()
     conn.close()
-    return redirect(url_for('index'))
+    return jsonify({'message': 'Deleted successfully'})
 
 if __name__ == '__main__':
     init_db()
