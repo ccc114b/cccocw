@@ -163,11 +163,26 @@ class ACLConsoleHandler(ACLHandler):
 class ACLParser:
     """ACL 指令解析器"""
     
-    def __init__(self, handler: ACLHandler):
+    def __init__(self, handler: ACLHandler, debug: bool = False):
         self.handler = handler
+        self.debug = debug
+    
+    def log(self, direction: str, message: str):
+        """記錄訊息"""
+        if self.debug:
+            prefix = "🔵" if direction == "→" else "🟠"
+            arrow = "→" if direction == "→" else "←"
+            print(f"\n{'='*50}")
+            print(f"{prefix} ACL {arrow} AI:")
+            print(f"{'='*50}")
+            # 只顯示前 500 字
+            print(message[:500] + "..." if len(message) > 500 else message)
     
     async def execute(self, xml_content: str) -> str:
         """執行 ACL 指令"""
+        # 記錄收到的訊息
+        self.log("←", xml_content)
+        
         # 移除思考過程
         xml_content = re.sub(r'Thinking\.\.\.[\s\S]*?done thinking\.', '', xml_content)
         
@@ -179,6 +194,8 @@ class ACLParser:
             file_path = match.group(1).strip()
             content = match.group(2).strip()
             result = await self.handler.on_write(file_path, content)
+            # 記錄傳送的訊息
+            self.log("→", f"<write file=\"{file_path}\">...內容...</write>")
             results.append(f"📝 寫入: {file_path}\n{result}")
         
         # 找所有 shell 指令

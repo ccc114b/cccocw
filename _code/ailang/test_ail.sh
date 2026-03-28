@@ -20,7 +20,7 @@ from minicode_ail import MiniCode, init_ollama
 init_ollama(model='minimax-m2.5:cloud')
 
 async def main():
-    agent = MiniCode(root_dir='./generated')
+    agent = MiniCode(root_dir='./generated', debug=True)
     await agent.run('''建立一個 SQLite TODO 網頁應用：
 
 詳細需求：

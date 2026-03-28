@@ -28,7 +28,7 @@ def index():
 @app.route('/api/todos', methods=['GET'])
 def get_todos():
     conn = get_db_connection()
-    todos = conn.execute('SELECT * FROM todos').fetchall()
+    todos = conn.execute('SELECT * FROM todos ORDER BY id DESC').fetchall()
     conn.close()
     return jsonify([dict(row) for row in todos])
 
@@ -40,29 +40,32 @@ def add_todo():
         return jsonify({'error': 'Title is required'}), 400
     
     conn = get_db_connection()
-    cursor = conn.execute('INSERT INTO todos (title) VALUES (?)', (title,))
+    cursor = conn.execute('INSERT INTO todos (title, completed) VALUES (?, 0)', (title,))
     conn.commit()
     todo_id = cursor.lastrowid
     conn.close()
-    return jsonify({'id': todo_id, 'title': title, 'completed': 0})
+    
+    return jsonify({'id': todo_id, 'title': title, 'completed': 0}), 201
 
-@app.route('/api/todos/<int:todo_id>', methods=['PUT'])
-def update_todo(todo_id):
+@app.route('/api/todos/<int:id>', methods=['PUT'])
+def update_todo(id):
     data = request.get_json()
     completed = data.get('completed', 0)
     
     conn = get_db_connection()
-    conn.execute('UPDATE todos SET completed = ? WHERE id = ?', (completed, todo_id))
+    conn.execute('UPDATE todos SET completed = ? WHERE id = ?', (completed, id))
     conn.commit()
     conn.close()
-    return jsonify({'id': todo_id, 'completed': completed})
+    
+    return jsonify({'id': id, 'completed': completed})
 
-@app.route('/api/todos/<int:todo_id>', methods=['DELETE'])
-def delete_todo(todo_id):
+@app.route('/api/todos/<int:id>', methods=['DELETE'])
+def delete_todo(id):
     conn = get_db_connection()
-    conn.execute('DELETE FROM todos WHERE id = ?', (todo_id,))
+    conn.execute('DELETE FROM todos WHERE id = ?', (id,))
     conn.commit()
     conn.close()
+    
     return jsonify({'message': 'Deleted successfully'})
 
 if __name__ == '__main__':

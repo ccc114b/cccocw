@@ -3,53 +3,106 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TODO 應用程式</title>
+    <title>TODO 應用</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
-        .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { text-align: center; margin-bottom: 20px; color: #333; }
-        .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
-        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 16px; }
-        button.add-btn { padding: 10px 20px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-        button.add-btn:hover { background: #218838; }
-        ul { list-style: none; }
-        li { display: flex; align-items: center; padding: 12px; border-bottom: 1px solid #eee; }
-        li:last-child { border-bottom: none; }
-        li.completed .todo-title { text-decoration: line-through; color: #999; }
-        .todo-title { flex: 1; margin-left: 10px; font-size: 16px; }
-        .delete-btn { padding: 6px 12px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; margin-left: 10px; }
-        .delete-btn:hover { background: #c82333; }
-        input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        ul {
+            list-style: none;
+        }
+        li {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        li.completed .todo-title {
+            text-decoration: line-through;
+            color: #999;
+        }
+        .todo-title {
+            flex: 1;
+            margin-left: 10px;
+        }
+        .checkbox {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+        .delete-btn {
+            background-color: #f44336;
+            margin-left: 10px;
+            padding: 5px 10px;
+        }
+        .delete-btn:hover {
+            background-color: #da190b;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>TODO 列表</h1>
-        <div class="input-group">
-            <input type="text" id="todoInput" placeholder="輸入新任務..." onkeypress="handleEnter(event)">
-            <button class="add-btn" onclick="addTodo()">新增</button>
-        </div>
-        <ul id="todoList"></ul>
+    <h1>TODO 列表</h1>
+    <div class="input-group">
+        <input type="text" id="todoInput" placeholder="輸入新任務...">
+        <button onclick="addTodo()">新增</button>
     </div>
+    <ul id="todoList"></ul>
 
     <script>
-        let todos = [];
-
         async function fetchTodos() {
             const response = await fetch('/api/todos');
-            todos = await response.json();
-            renderTodos();
+            const todos = await response.json();
+            renderTodos(todos);
         }
 
-        function renderTodos() {
+        function renderTodos(todos) {
             const list = document.getElementById('todoList');
             list.innerHTML = '';
             todos.forEach(todo => {
                 const li = document.createElement('li');
-                li.className = todo.completed ? 'completed' : '';
+                if (todo.completed) {
+                    li.classList.add('completed');
+                }
                 li.innerHTML = `
-                    <input type="checkbox" ${todo.completed ? 'checked' : ''} onchange="toggleComplete(${todo.id}, this.checked)">
+                    <input type="checkbox" class="checkbox" 
+                        ${todo.completed ? 'checked' : ''} 
+                        onchange="toggleTodo(${todo.id}, this.checked)">
                     <span class="todo-title">${escapeHtml(todo.title)}</span>
                     <button class="delete-btn" onclick="deleteTodo(${todo.id})">刪除</button>
                 `;
@@ -68,35 +121,36 @@
             const title = input.value.trim();
             if (!title) return;
 
-            const response = await fetch('/api/todos', {
+            await fetch('/api/todos', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title })
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title})
             });
-
-            if (response.ok) {
-                input.value = '';
-                fetchTodos();
-            }
+            input.value = '';
+            fetchTodos();
         }
 
-        async function toggleComplete(id, completed) {
+        async function toggleTodo(id, completed) {
             await fetch(`/api/todos/${id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ completed: completed ? 1 : 0 })
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({completed: completed ? 1 : 0})
             });
             fetchTodos();
         }
 
         async function deleteTodo(id) {
-            await fetch(`/api/todos/${id}`, { method: 'DELETE' });
+            await fetch(`/api/todos/${id}`, {
+                method: 'DELETE'
+            });
             fetchTodos();
         }
 
-        function handleEnter(event) {
-            if (event.key === 'Enter') addTodo();
-        }
+        document.getElementById('todoInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                addTodo();
+            }
+        });
 
         fetchTodos();
     </script>
