@@ -1,0 +1,17 @@
+# todo.ail - SQLite TODO 應用
+
+## 任務
+建立一個 SQLite TODO 網頁應用
+
+## 詳細需求
+1. 後端用 Flask + SQLite
+2. 首頁路由 / 回傳 templates/index.html
+3. API: GET/POST /api/todos, PUT/DELETE /api/todos/<id>
+4. 資料表欄位：id, title, completed
+5. 前端用 HTML + JavaScript
+6. 功能：顯示列表、新增、刪除、勾選完成
+
+## 輸出格式
+如果規格不清楚，用 <ask>...</ask> 詢問。
+
+請直接寫出程式碼。
