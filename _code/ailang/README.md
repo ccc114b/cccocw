@@ -1,5 +1,13 @@
 # AIL (AI Language)
 
+> **作者**: 陳鍾誠, OpenCode+Minimax-m2.5-free
+
+* 論文
+    * [AIL: A Programming Language Framework Designed for AI Development (PDF)](https://ccc114b.github.io/cccocw/_code/ailang/_doc/ailang_paper_english.pdf)
+    * [AIL: 為人工智慧開發設計的程式語言框架 (Markdown)](./_doc/ailang_paper_tw.md)
+
+## 摘要
+
 為人工智慧開發設計的 Python 擴充套件
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
