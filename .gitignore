@@ -1,5 +1,7 @@
 .DS_Store
 
+# mac
+*.pkg
 # rust
 release/
 debug/
