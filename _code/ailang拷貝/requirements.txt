@@ -1,4 +1,0 @@
-# AIL (AI Language) - Python 擴充套件
-
-# 核心依賴
-aiohttp>=3.9.0
