@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# agent0.py - AI Agent using Ollama
+# 修改自：
+#   https://gist.github.com/dabit3/86ee04a1c02c839409a02b20fe99a492
+#   mini-openclaw.py - A minimal OpenClaw clone
+# ccc 重新命名為：
+#   agent0.py - AI Agent using Ollama
 # Run: python agent0.py
 
 import subprocess
