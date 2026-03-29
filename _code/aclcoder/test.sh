@@ -1,0 +1,1 @@
+python -u test_blog.py 2>&1

@@ -100,9 +100,13 @@ class AIExecutor:
     def __init__(self, root_dir: str = ".", debug: bool = False):
         self.root = Path(root_dir)
         self.debug = debug
+        self.project_context = ""
         
         # ACL 處理器（延遲載入避免循環依賴）
         self._acl_handler = None
+        
+        # AI 指揮官
+        self.commander = AICommander()
         
         # AI 執行者
         self.agent = OllamaAgentWrapper(
@@ -130,10 +134,14 @@ class AIExecutor:
         print(f"\n🎯 任務: {task}")
         print("="*50)
         
+        # 設定專案目標給 AICommander
+        self.project_context = task
+        self.commander.set_project(task)
+        
         files = self._list_files()
         print(f"📁 現有檔案:\n{files}")
         
-        max_iterations = 5
+        max_iterations = 2
         iteration = 0
         
         while iteration < max_iterations:
@@ -145,8 +153,11 @@ class AIExecutor:
 
 任務: {task}
 
-直接寫出程式碼，用以下格式：
-<write file="backend.py">
+上次詢問的問題已經得到回答，請根據回答開始寫程式碼。
+不要再次問問題，直接輸出 <write> 標籤。
+
+用以下格式：
+<write file="檔名">
 程式碼
 </write>
 <write file="templates/index.html">
@@ -181,9 +192,29 @@ HTML
             if '<ask>' not in result:
                 break
             
-            # TODO: 使用 AICommander 自動回答
-            print(f"\n⚠️ 有詢問: (暫時忽略)")
-            break
+            # 使用 AICommander 自動回答
+            import re
+            ask_pattern = r'<ask>(.+?)</ask>'
+            questions = re.findall(ask_pattern, result, re.DOTALL)
+            
+            for question in questions:
+                question = question.strip()
+                print(f"\n{'='*60}")
+                print(f"❓ AIExecutor 詢問:")
+                print(f"{'='*60}")
+                print(question)
+                print(f"{'='*60}")
+                
+                # AICommander 回答
+                answer = await self.commander.answer(question)
+                print(f"\n{'='*60}")
+                print(f"💬 AICommander 回覆:")
+                print(f"{'='*60}")
+                print(answer)
+                print(f"{'='*60}")
+            
+            # 繼續下一輪，讓 AI 根據回答開始寫程式碼
+            print("\n🔄 收到回覆後，請開始寫程式碼，不要再問問題了!")
         
         return result
     

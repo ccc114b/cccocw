@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aclcoder"
+version = "0.1.0"
+description = "AI Code Generator using ACL Protocol"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "AIL Team"}
+]
+keywords = ["ai", "code-generator", "acl", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.8.0",
+]
+
+[project.scripts]
+aclcoder = "aclcoder.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ailang/aclcoder"
+Repository = "https://github.com/ailang/aclcoder"
+
+[tool.setuptools.packages.find]
+where = ["src"]

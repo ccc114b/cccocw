@@ -38,9 +38,19 @@ class OllamaClient:
         max_tokens: int = 1024,
         history: List[ChatMessage] = None
     ) -> str:
-        """使用 subprocess 發送請求"""
-        import subprocess
-        import asyncio
+        """使用 HTTP API 發送請求（預設）"""
+        return await self.chat_via_api(message, system_prompt, temperature, max_tokens, history)
+    
+    async def chat_via_api(
+        self,
+        message: str,
+        system_prompt: str = "You are a helpful AI assistant.",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        history: List[ChatMessage] = None
+    ) -> str:
+        """使用 HTTP API 發送請求"""
+        import aiohttp
         
         full_prompt = f"{system_prompt}\n\n"
         if history:
@@ -48,22 +58,26 @@ class OllamaClient:
                 full_prompt += f"{msg.role}: {msg.content}\n"
         full_prompt += f"user: {message}"
         
-        proc = await asyncio.create_subprocess_exec(
-            "ollama", "run", self.model,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        payload = {
+            "model": self.model,
+            "prompt": full_prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
         
-        stdout, stderr = await proc.communicate(input=full_prompt.encode())
-        
-        if proc.returncode != 0:
-            raise Exception(f"Ollama Error: {stderr.decode()}")
-        
-        result = stdout.decode()
-        import re
-        result = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', result)
-        return result.strip()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://localhost:11434/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Ollama API Error: {await resp.text()}")
+                result = await resp.json()
+                return result.get("response", "").strip()
     
     async def chat_stream(
         self,

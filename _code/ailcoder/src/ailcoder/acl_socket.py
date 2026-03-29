@@ -213,13 +213,6 @@ class ACLParser:
             result = await self.handler.on_read(file_path)
             results.append(f"📄 讀取: {file_path}\n{result[:500]}")
         
-        # 找所有 ask 指令（需要詢問）
-        ask_pattern = r'<ask>\s*(.+?)\s*</ask>'
-        for match in re.finditer(ask_pattern, xml_content, re.DOTALL):
-            question = match.group(1).strip()
-            answer = await self.handler.on_ask(question)
-            results.append(f"❓ 詢問: {question}\n➤ 回覆: {answer}")
-        
         return "\n\n".join(results) if results else "沒有執行任何指令"
 
 
