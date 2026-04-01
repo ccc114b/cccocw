@@ -96,6 +96,6 @@ def run_file(filename):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("用法: python lispInterpreter.py <filename.lisp>")
+        print("用法: python lisp.py <filename.lisp>")
     else:
         run_file(sys.argv[1])
