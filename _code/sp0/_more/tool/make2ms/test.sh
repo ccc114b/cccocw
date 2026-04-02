@@ -1,1 +1,0 @@
-python make2ms.py Makefile Makefile.nmake
