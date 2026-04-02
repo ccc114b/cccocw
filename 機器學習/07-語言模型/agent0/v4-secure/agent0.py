@@ -14,6 +14,7 @@ import re
 WORKSPACE = os.path.expanduser("~/.agent0")
 MODEL = "minimax-m2.5:cloud"
 MAX_TURNS = 5
+MAX_TOOL_CALLS = 20
 ALLOWED_DIR = os.getcwd()
 
 # ─── Memory ───
@@ -217,6 +218,8 @@ SECURITY RESTRICTIONS:
 - You CANNOT use path traversal (../) to escape the current directory
 - If a command would violate these restrictions, you must reject it with a security error message
 
+IMPORTANT: When asked to create a project with multiple files, create ALL necessary files in a single batch. Do not ask for confirmation between files. Complete the entire task before stopping.
+
 When you need to use a tool, output in this format:
 <tool>
 {"name": "tool_name", "input": {"key": "value"}}
@@ -258,17 +261,28 @@ def main():
         
         tool_result = None
         current_response = response
+        tool_call_count = 0
         
         while True:
             tool_matches = re.findall(r'<tool>(.+?)</tool>', current_response, re.DOTALL)
             if not tool_matches:
                 break
             
+            tool_call_count += 1
+            if tool_call_count >= MAX_TOOL_CALLS:
+                current_response += "\n\n[Max tool calls reached. Provide your final response.]"
+                break
+            
             all_tool_outputs = []
             for tool_match in tool_matches:
                 try:
                     tool_json = tool_match.strip()
-                    tool_data = json.loads(tool_json)
+                    try:
+                        tool_data = json.loads(tool_json)
+                    except json.JSONDecodeError:
+                        if not tool_json.endswith('}'):
+                            tool_json = tool_json.rstrip() + '}'
+                        tool_data = json.loads(tool_json)
                     tool_name = tool_data.get("name")
                     tool_input = tool_data.get("input", {})
                     
