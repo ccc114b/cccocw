@@ -1,5 +1,5 @@
 {
-  "name": "blog2",
+  "name": "blog",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -11,8 +11,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "better-sqlite3": "^12.8.0",
+    "body-parser": "^2.2.2",
     "ejs": "^5.0.1",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "sqlite3": "^6.0.1"
   }
 }
