@@ -235,8 +235,8 @@ MIT 的作業通常包括：
 - 官方網站：https://pdos.csail.mit.edu/6.1810/
 - GitHub：https://github.com/mit-pdos/xv6-riscv
 - 書籍：《xv6: a simple, Unix-like teaching operating system》
-- 相關概念：[[作業系統]]
-- 相關概念：[[記憶體管理]]
+- 相關概念：[作業系統](../../../系統程式/概念/作業系統.md)
+- 相關概念：[記憶體管理](../../../系統程式/主題/記憶體管理.md)
 
 ## Tags
 

@@ -267,8 +267,8 @@ def evaluate_context(context: str, task: str, response: str) -> dict:
 
 ## 相關資源
 
-- 相關概念：[[Prompt工程]]
-- 相關概念：[[Harness Engineering]]
+- 相關概念：[Prompt工程](../../../軟體工程/主題/Prompt工程.md)
+- 相關概念：[Harness Engineering](../../../軟體工程/主題/Harness工程.md)
 
 ## Tags
 

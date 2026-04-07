@@ -334,7 +334,7 @@ mini-openclaw 展示了 AI Agent 的核心組成：
 ## 相關資源
 
 - GitHub Gist：https://gist.github.com/dabit3/86ee04a1c02c839409a02b20fe99a492
-- 相關主題：[[大型語言模型]]
+- 相關主題：[大型語言模型](../../../機器學習/主題/大型語言模型.md)
 
 ## Tags
 

@@ -243,8 +243,8 @@ def test_prompt(prompt: str, test_cases: list[dict]) -> dict:
 
 ## 相關資源
 
-- 相關概念：[[Context Engineering]]
-- 相關概念：[[Harness Engineering]]
+- 相關概念：[Context Engineering](../../../軟體工程/主題/Context工程.md)
+- 相關概念：[Harness Engineering](../../../軟體工程/主題/Harness工程.md)
 
 ## Tags
 

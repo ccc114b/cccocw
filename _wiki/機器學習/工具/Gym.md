@@ -303,8 +303,8 @@ import gym
 
 - GitHub：https://github.com/openai/gym
 - 文件：https://www.gymlibrary.dev
-- 相關概念：[[強化學習]]
-- 相關工具：[[PyTorch]]
+- 相關概念：[強化學習](../../../機器學習/概念/強化學習.md)
+- 相關工具：[PyTorch](../../../機器學習/工具/PyTorch.md)
 
 ## Tags
 

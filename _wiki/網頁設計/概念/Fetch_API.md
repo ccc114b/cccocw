@@ -246,9 +246,9 @@ async function uploadWithProgress(file) {
 
 ## 相關資源
 
-- 相關概念：[[API]]
-- 相關主題：[[RESTful]]
-- 相關主題：[[WebSocket]]
+- 相關概念：[API](../../../網頁設計/概念/API.md)
+- 相關主題：[RESTful](../../../網頁設計/主題/RESTful.md)
+- 相關主題：[WebSocket](../../../網頁設計/主題/WebSocket.md)
 
 ## Tags
 
