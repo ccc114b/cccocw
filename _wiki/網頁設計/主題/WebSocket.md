@@ -55,4 +55,4 @@ wss.on('connection', (ws) => {
 ## 相關概念
 
 - [後端開發](主題/後端開發.md)
-- [HTTP](02-系統程式/主題/HTTP.md)
+- [HTTP](../系統程式/主題/HTTP.md)
