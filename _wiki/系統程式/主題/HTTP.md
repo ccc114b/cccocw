@@ -43,5 +43,5 @@ Content-Length: 123
 
 ## 相關概念
 
-- [TCP-IP協定](主題/TCP-IP协定.md)
-- [網路](概念/網路.md)
+- [TCP-IP協定](../主題/TCP-IP协定.md)
+- [網路](../概念/網路.md)

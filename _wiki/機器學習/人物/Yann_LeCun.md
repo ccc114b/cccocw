@@ -20,6 +20,6 @@
 
 ## 相關概念
 
-- [卷積神經網路](主題/卷積神經網路.md)
-- [深度學習](概念/深度學習.md)
-- [Geoffrey_Hinton](人物/Geoffrey_Hinton.md)
+- [卷積神經網路](../主題/卷積神經網路.md)
+- [深度學習](../概念/深度學習.md)
+- [Geoffrey_Hinton](../人物/Geoffrey_Hinton.md)

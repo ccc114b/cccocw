@@ -51,5 +51,5 @@ app.listen(3000, () => {
 
 ## 相關概念
 
-- [後端開發](主題/後端開發.md)
-- [JavaScript](概念/JavaScript.md)
+- [後端開發](../主題/後端開發.md)
+- [JavaScript](../概念/JavaScript.md)

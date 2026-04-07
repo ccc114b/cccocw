@@ -376,8 +376,8 @@ class ProductionMonitor:
 
 ## 相關資源
 
-- 相關概念：[Prompt工程](../../../軟體工程/主題/Prompt工程.md)
-- 相關概念：[Context工程](../../../軟體工程/主題/Context工程.md)
+- 相關概念：[Prompt工程](../主題/Prompt工程.md)
+- 相關概念：[Context工程](../主題/Context工程.md)
 
 ## Tags
 

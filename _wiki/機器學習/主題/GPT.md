@@ -258,9 +258,9 @@ print(response.choices[0].message.content)
 
 ## 相關資源
 
-- 相關概念：[Transformer](../../../機器學習/主題/Transformer.md)
-- 相關概念：[大型語言模型](../../../機器學習/主題/大型語言模型.md)
-- 相關工具：[microgpt](../../../機器學習/工具/microgpt.md) - 極簡 GPT 實現
+- 相關概念：[Transformer](../主題/Transformer.md)
+- 相關概念：[大型語言模型](../主題/大型語言模型.md)
+- 相關工具：[microgpt](../工具/microgpt.md) - 極簡 GPT 實現
 
 ## Tags
 

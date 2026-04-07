@@ -61,7 +61,7 @@
 
 ## 相關人物
 
-- [John Hennessy](../../../計算機結構/人物/John_Hennessy.md) - 圖靈獎共同獲獎者
+- [John Hennessy](../人物/John_Hennessy.md) - 圖靈獎共同獲獎者
 - RISC-V 社群
 
 ## 參考資源

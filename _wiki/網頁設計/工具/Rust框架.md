@@ -497,9 +497,9 @@ CMD ["/app/myapp"]
 
 ## 相關資源
 
-- 相關概念：[API](../../../網頁設計/概念/API.md)
-- 相關主題：[RESTful](../../../網頁設計/主題/RESTful.md)
-- 相關工具：[Node.js](../../../網頁設計/工具/Node.js.md)
+- 相關概念：[API](../概念/API.md)
+- 相關主題：[RESTful](../主題/RESTful.md)
+- 相關工具：[Node.js](../工具/Node.js.md)
 
 ## Tags
 

@@ -30,5 +30,5 @@ CMD ["python3", "app.py"]
 
 ## 相關概念
 
-- [雲端技術](概念/雲端技術.md)
-- [Kubernetes](工具/Kubernetes.md)
+- [雲端技術](../概念/雲端技術.md)
+- [Kubernetes](../工具/Kubernetes.md)

@@ -403,9 +403,9 @@ API_SECRET=my-secret-key
 
 ## 相關資源
 
-- 相關工具：[React](../../../網頁設計/工具/React.md)
-- 相關概念：[Fetch_API](../../../網頁設計/概念/Fetch_API.md)
-- 相關主題：[前端框架](../../../網頁設計/主題/前端框架.md)
+- 相關工具：[React](../工具/React.md)
+- 相關概念：[Fetch_API](../概念/Fetch_API.md)
+- 相關主題：[前端框架](../主題/前端框架.md)
 
 ## Tags
 

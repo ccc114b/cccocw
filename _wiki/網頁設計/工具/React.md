@@ -57,5 +57,5 @@ function useCustom() {
 
 ## 相關概念
 
-- [前端框架](主題/前端框架.md)
-- [JavaScript](概念/JavaScript.md)
+- [前端框架](../主題/前端框架.md)
+- [JavaScript](../概念/JavaScript.md)

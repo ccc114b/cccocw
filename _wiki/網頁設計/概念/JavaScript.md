@@ -65,6 +65,6 @@ async function loadData() {
 
 ## 相關概念
 
-- [HTML](概念/HTML.md)
-- [前端框架](主題/前端框架.md)
-- [API](概念/API.md)
+- [HTML](../概念/HTML.md)
+- [前端框架](../主題/前端框架.md)
+- [API](../概念/API.md)

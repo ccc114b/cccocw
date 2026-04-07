@@ -43,5 +43,5 @@ HTML (HyperText Markup Language) 是建立網頁的基礎標記語言。
 
 ## 相關概念
 
-- [CSS](概念/CSS.md)
-- [JavaScript](概念/JavaScript.md)
+- [CSS](../概念/CSS.md)
+- [JavaScript](../概念/JavaScript.md)

@@ -56,5 +56,5 @@ query {
 
 ## 相關概念
 
-- [RESTful](主題/RESTful.md)
-- [JavaScript](概念/JavaScript.md)
+- [RESTful](../主題/RESTful.md)
+- [JavaScript](../概念/JavaScript.md)

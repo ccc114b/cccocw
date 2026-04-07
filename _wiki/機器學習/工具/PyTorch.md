@@ -55,5 +55,5 @@ for epoch in range(10):
 
 ## 相關概念
 
-- [TensorFlow](工具/TensorFlow.md)
-- [深度學習](概念/深度學習.md)
+- [TensorFlow](../工具/TensorFlow.md)
+- [深度學習](../概念/深度學習.md)

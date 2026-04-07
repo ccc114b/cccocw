@@ -49,8 +49,8 @@
 
 ## 相關人物
 
-- [David Patterson](../../../計算機結構/人物/David_Patterson.md) - 圖靈獎共同獲獎者
-- [John Hennessy](../../../計算機結構/人物/John_Hennessy.md) 的研究夥伴
+- [David Patterson](../人物/David_Patterson.md) - 圖靈獎共同獲獎者
+- [John Hennessy](../人物/John_Hennessy.md) 的研究夥伴
 
 ## 參考資源
 

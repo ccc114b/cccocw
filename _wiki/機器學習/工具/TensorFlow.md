@@ -49,5 +49,5 @@ tflite_model = converter.convert()
 
 ## 相關概念
 
-- [PyTorch](工具/PyTorch.md)
-- [深度學習](概念/深度學習.md)
+- [PyTorch](../工具/PyTorch.md)
+- [深度學習](../概念/深度學習.md)

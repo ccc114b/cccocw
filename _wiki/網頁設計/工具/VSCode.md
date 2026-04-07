@@ -41,5 +41,5 @@ VSCode (Visual Studio Code) 是 Microsoft 開發的程式碼編輯器。
 
 ## 相關概念
 
-- [Git](工具/Git.md)
-- [JavaScript](概念/JavaScript.md)
+- [Git](../工具/Git.md)
+- [JavaScript](../概念/JavaScript.md)

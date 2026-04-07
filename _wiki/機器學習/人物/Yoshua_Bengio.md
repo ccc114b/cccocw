@@ -63,8 +63,8 @@ Mila 是全球領先的 AI 研究機構之一：
 
 ## 相關人物
 
-- [Geoffrey_Hinton](../../../機器學習/人物/Geoffrey_Hinton.md) - 圖靈獎共同獲獎者
-- [Yann_LeCun](../../../機器學習/人物/Yann_LeCun.md) - 圖靈獎共同獲獎者
+- [Geoffrey_Hinton](../人物/Geoffrey_Hinton.md) - 圖靈獎共同獲獎者
+- [Yann_LeCun](../人物/Yann_LeCun.md) - 圖靈獎共同獲獎者
 
 ## 參考資源
 

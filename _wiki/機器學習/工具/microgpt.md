@@ -235,8 +235,8 @@ ChatGPT 的對話，對模型來說只是「文件補全」。
 - 原始文章：https://karpathy.github.io/2026/02/12/microgpt/
 - GitHub Gist：https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95
 - Google Colab：https://colab.research.google.com/drive/1vyN5zo6rqUp_dYNb4Yrco66zuWCZKoN
-- 相關主題：[大型語言模型](../../../機器學習/主題/大型語言模型.md)
-- 相關主題：[Transformer](../../../機器學習/主題/Transformer.md)
+- 相關主題：[大型語言模型](../主題/大型語言模型.md)
+- 相關主題：[Transformer](../主題/Transformer.md)
 
 ## Tags
 

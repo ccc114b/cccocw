@@ -22,6 +22,6 @@
 
 ## 相關概念
 
-- [C語言](主題/C語言.md)
-- [Ken_Thompson](人物/Ken_Thompson.md)
-- [編譯器](概念/編譯器.md)
+- [C語言](../主題/C語言.md)
+- [Ken_Thompson](../人物/Ken_Thompson.md)
+- [編譯器](../概念/編譯器.md)

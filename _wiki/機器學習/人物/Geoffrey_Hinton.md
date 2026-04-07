@@ -24,7 +24,7 @@
 
 ## 相關概念
 
-- [深度學習](概念/深度學習.md)
-- [神經網路](概念/神經網路.md)
-- [Yann_LeCun](人物/Yann_LeCun.md)
-- [Yoshua_Bengio](人物/Yoshua_Bengio.md)
+- [深度學習](../概念/深度學習.md)
+- [神經網路](../概念/神經網路.md)
+- [Yann_LeCun](../人物/Yann_LeCun.md)
+- [Yoshua_Bengio](../人物/Yoshua_Bengio.md)
