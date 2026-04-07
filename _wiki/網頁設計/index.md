@@ -5,29 +5,29 @@
 ## 索引
 
 ### 概念
-- [HTML](概念/HTML.md)
-- [CSS](概念/CSS.md)
-- [JavaScript](概念/JavaScript.md)
-- [API](概念/API.md)
-- [Fetch_API](概念/Fetch_API.md) - HTTP 請求介面
-- [表單處理](概念/表單處理.md) - 表單驗證與提交
+- [HTML](HTML.md)
+- [CSS](CSS.md)
+- [JavaScript](JavaScript.md)
+- [API](API.md)
+- [Fetch_API](Fetch_API.md) - HTTP 請求介面
+- [表單處理](表單處理.md) - 表單驗證與提交
 
 ### 主題
-- [響應式設計](主題/響應式設計.md)
-- [前端框架](主題/前端框架.md)
-- [後端開發](主題/後端開發.md)
-- [資料庫](主題/資料庫.md)
-- [RESTful](主題/RESTful.md)
-- [WebSocket](主題/WebSocket.md)
-- [SQLite](主題/SQLite.md) - 輕量嵌入式資料庫
+- [響應式設計](響應式設計.md)
+- [前端框架](前端框架.md)
+- [後端開發](後端開發.md)
+- [資料庫](資料庫.md)
+- [RESTful](RESTful.md)
+- [WebSocket](WebSocket.md)
+- [SQLite](SQLite.md) - 輕量嵌入式資料庫
 
 ### 工具
-- [React](工具/React.md)
-- [Node.js](工具/Node.js.md)
-- [VSCode](工具/VSCode.md)
-- [Next.js](工具/Next.js.md) - React 元框架
-- [FastAPI](工具/FastAPI.md) - Python 高效能 Web 框架
-- [Rust框架](工具/Rust框架.md) - Actix/Axum/Rocket/Warp
+- [React](React.md)
+- [Node.js](Node.js.md)
+- [VSCode](VSCode.md)
+- [Next.js](Next.js.md) - React 元框架
+- [FastAPI](FastAPI.md) - Python 高效能 Web 框架
+- [Rust框架](Rust框架.md) - Actix/Axum/Rocket/Warp
 
 ## 日志
 - 参见 [log.md](log.md)
