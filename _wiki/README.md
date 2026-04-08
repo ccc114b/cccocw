@@ -27,7 +27,7 @@ LLM Wiki 是一種個人知識庫模式，與傳統 RAG 不同：
 
 ## 使用方式
 
-請參考 `./AGENTS.md` 了解如何與 LLM 協作維護此 Wiki。
+請參考 `./AGENTS.md` 瞭解如何與 LLM 協作維護此 Wiki。
 
 ## 為什麼有效
 

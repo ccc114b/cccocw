@@ -203,13 +203,13 @@ def ensemble_prompt(prompt: str, n_responses: int = 3) -> str:
         responses.append(response)
     
     # 讓 LLM 綜合所有回答
-    return llm(f"""综合以下多个回答，给出最佳回复：
+    return llm(f"""綜合以下多個回答，給出最佳回覆：
 
 回答1: {responses[0]}
 回答2: {responses[1]}
 回答3: {responses[2]}
 
-请给出最全面、最准确的答案。""")
+請給出最全面、最準確的答案。""")
 ```
 
 ## 常見陷阱

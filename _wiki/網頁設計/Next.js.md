@@ -389,7 +389,7 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/mydb
 API_SECRET=my-secret-key
 
 # .env.production
-# 在 Vercel 或其他平台設定
+# 在 Vercel 或其他平臺設定
 ```
 
 ## 最佳實踐
@@ -410,3 +410,7 @@ API_SECRET=my-secret-key
 ## Tags
 
 #Next.js #React #SSR #SSG #全端開發
+
+## 範例代碼
+
+- [01-basics.html](../_code/網頁設計/Next.js/01-basics.html) - Next.js 基本範例 (Routing, SSR, SSG, ISR, API Routes, Components)

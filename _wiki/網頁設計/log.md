@@ -1,4 +1,21 @@
-# 日志
+# 日誌
+
+## [2026-04-08] add | Blog 系統範例
+
+- 新增 Blog 系統 - 完整部落格前後端範例
+  - server.js (Express + SQLite API)
+  - public/index.html (前端頁面)
+  - public/styles.css (樣式)
+  - public/app.js (前端邏輯)
+  - test.js (25 項自動化測試)
+- 新增 Blog系統.md Wiki 頁面
+- 更新 index.md
+
+## [2026-04-08] add | 即時聊天範例
+
+- 新增 即時聊天.md - WebSocket 聊天說明
+- 新增 _code/網頁設計/即時聊天/ - 完整聊天系統
+- 更新 index.md
 
 ## [2026-04-07] add | 後端與框架
 
