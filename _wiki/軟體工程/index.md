@@ -29,6 +29,8 @@
 - [Harness工程](Harness工程.md) - AI 智慧體的約束與驗證系統 | tags: 馭繮, 代理, AGENTS.md
 - [Agent發展史](Agent發展史.md) - AI Agent 的發展演進 | tags: 歷史, 演進, Prompt, Context
 - [Skill文檔](Skill文檔.md) - Claude Code 的 Skill 擴展機制 | tags: Skills, 領域知識
+- [KarpathySkill](KarpathySkill.md) - Karpathy 四原則的編碼指南 | tags: 四原則, 編碼
+- [karpathy](karpathy.md) - Andrej Karpathy 的 AI 編碼原則與專案 | tags: nanoGPT, LLM Wiki, 四原則
 
 ## 工具
 

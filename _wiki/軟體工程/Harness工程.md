@@ -2,18 +2,18 @@
 
 ## 概述
 
-Harness Engineering（馭繮工程）是 2026 年提出的工程範式，工程師不再埋頭寫代碼，而是設計環境、明確意圖、建構反饋迴圈，讓 AI 智慧體能可靠地完成工作。
+Harness Engineering（馭繮工程）是 OpenAI 在 2026 年提出的工程範式：工程師不再寫代碼，而是設計環境、明確意圖、建構反饋迴圈，讓 AI 智慧體可靠地完成工作。
 
-根據 OpenAI 的實驗：五個月內從零建立了一個包含百萬行代碼的產品，約 1500 個 PR，平均每位工程師每天 3.5 個 PR，人類從未直接寫任何一行代碼。
+根據 [deusyu/harness-engineering](https://github.com/deusyu/harness-engineering) 學習指南和 [OpenAI 原文](https://openai.com/index/harness-engineering/)。
+
+## 核心轉變
 
 ```
 傳統工程：人類寫代碼 → 機器執行代碼
 Harness Engineering：人類設計約束 → 智慧體寫代碼 → 機器執行代碼
 ```
 
-## 核心轉變
-
-工程師的產出從程式碼變成了約束系統：AGENTS.md、架構規則、自訂 linter、反饋迴圈。
+**工程師的產出從程式碼變成了約束系統** — AGENTS.md、架構規則、自訂 linter、反饋迴圈。
 
 人類的角色變成「掌舵者」，而非「執行者」：
 ```
@@ -21,171 +21,71 @@ Harness Engineering：人類設計約束 → 智慧體寫代碼 → 機器執行
 智慧體：寫代碼、跑測試、回應回饋
 ```
 
-## 為什麼需要 Harness
+## 關鍵數據
 
-AI 智慧體能力越來越強，但可靠度卻沒跟上。問題不在於模型不夠聰明，而在於：
+| 指標 | 數據 |
+|------|------|
+| 團隊規模 | 3 人 → 7 人 |
+| 時間跨度 | 5 個月 |
+| 代碼量 | ~100 萬行 |
+| PR 數量 | ~1,500 個 |
+| 人均日 PR | 3.5 個 |
+| 單次运行时长 | 6+ 小時 |
+| 效率估算 | 手工編寫的 ~1/10 時間 |
 
-- 智慧體看不見倉庫裡的隱式規則
-- 架構約束從未被傳達給它
-- 規範寫在 Wiki 或群裡，智慧體讀不到
-- Prompt 再長也裝不下整個倉庫的架構決策
+---
 
-## 兩大控制機制
+## 六大核心概念
 
-### Feedforward（引導）
+### 1. 倉庫即記錄系統
 
-在智慧體行動前給予指導，預防問題發生：
-
-| 類型 | 範例 | 費用 |
-|------|------|------|
-| 計算型 | Linter、類型檢查、结构测试 | 低（毫秒級） |
-| 推理型 | AGENTS.md、Skills、系統提示 | 高（GPU 計算） |
-
-### Feedback（感測）
-
-在智慧體行動後觀察結果，自動修正：
-
-| 類型 | 範例 | 費用 |
-|------|------|------|
-| 計算型 | 靜態分析、日誌、測試 | 低 |
-| 推理型 | AI code review、LLM as judge | 高 |
-
-只有引導沒有感測：智慧體會重複犯錯
-只有感測沒有引導：智慧體會遵守規則但不知道是否正確
-
-## 三種約束類別
-
-### 1. 可維護性約束（Maintainability）
-
-調節內部程式碼品質：
+**不在倉庫裡的東西，對智慧體不存在。**
 
 ```
-計算型感測：重複程式碼、圈複雜度、測試覆蓋率、架構漂移、風格違規
-推理型感測：語意重複、過度工程、不必要功能
+位置              對人類    對智慧體
+────────────────────────────────
+Google Docs        ✅       ❌
+Slack 討論       ✅       ❌
+團隊成員腦中      ✅       ❌
+倉庫內 Markdown   ✅       ✅
+代碼 + 註釋     ✅       ✅
+Lint 規則       間接 ✅    ✅ (強制)
 ```
 
-### 2. 架構適應性約束（Architecture Fitness）
+**實踐**：
+1. AGENTS.md 是目錄，不是百科 — ~100行，只指路
+2. 專職 linter + CI 驗證 — 知識庫是否更新、是否交叉連結
+3. doc-gardening 智慧體 — 定期掃描過時文檔，自動發起修復 PR
+4. 執行計劃是一等工件 — 提交到倉庫，版本控制
 
-定義和檢查系統的架構特性：
-
-```typescript
-// 範例：分層架構
-Types → Config → Repo → Service → Runtime → UI
-
-// 規則：高層可以依賴低層，反之不行
-// 違反時：OpenCode linter 报错
-```
-
-透過自訂 linter 和結構測試強制執行。
-
-### 3. 行為約束（Behaviour）
-
-確保應用程式功能正確：
-
-```
-Feedforward：功能規格（spec）
-Feedback：AI 生成的測試、人類審查、手動測試
-```
-
-這是目前最困難的約束類別。
-
-## OpenAI 的六大支柱
-
-### 1. 倉庫即系統紀錄
-
-**給地圖，不要給說明書**：AGENTS.md 應該是目錄（約 100 行），不是百科全書。
-
-```
-AGENTS.md           → 目錄（inject into context）
+```markdown
+# 文档结构
+AGENTS.md              ← 入口目錄 (~100行)
+ARCHITECTURE.md         ← 域和包分層的頂層地圖
 docs/
-├── design-docs/    → 設計文檔
-├── exec-plans/    → 執行計劃
-├── references/    → 參考資料
-└── generated/     → 生成的內容
+├── design-docs/       ← 設計決策，帶驗證狀態
+├── exec-plans/        ← 執行計劃，帶進度和決策日誌
+├── product-specs/     ← 產品規格
+├── references/       ← 外部參考
+├── generated/        ← 自動生成（DB schema 等）
+└── QUALITY_SCORE.md  ← 每個領域的質量評分
 ```
 
-所有知識必須在倉庫裡，否則智慧體看不見。
+### 2. 地圖而非手冊
 
-### 2. 应用可讀性
+**AGENTS.md 是目錄頁，不是百科全書。**
 
-讓應用程式本身對智慧體可讀：
+巨型指令檔案的三個死因：
+- 擠占上下文
+- 無法維護
+- 無法機械驗證
 
-```typescript
-// 讓 OpenCode 可以啟動和驅動應用
-// 範例：每個 worktree 有獨立的 app instance
-opencode_dev_app = boot_worktree(git_branch)
-
-// CDP 整合
-opencode.snapshot_before()
-opencode.trigger_ui_action()
-opencode.snapshot_after()
-opencode.compare_screenshots()
-```
-
-### 3. 可觀測性堆疊
+**漸進式披露**：智慧體從小入口點開始，被指導下一步該看什麼。
 
 ```markdown
-# 本地可觀測性堆疊
-app -> logs, metrics, traces -> Vector -> Victoria Logs/Metrics/Traces
+# AGENTS.md (~100行)
 
-# OpenCode 可以查詢
-opencode.query_logql("error | rate > 10")
-opencode.query_promql("latency_p99 > 2s")
-```
-
-### 4. 強制架構與品味
-
-```
-分層領域架構（Layered Domain Architecture）：
-- 每個業務領域分成固定層級
-- 嚴格驗證依賴方向
-- 允許的邊緣數量有限
-
-Types → Config → Repo
-Providers → Service → Runtime → UI
-```
-
-透過自訂 linter 強制執行（linter 本身也是 OpenCode 生成的）。
-
-### 5. 吞吐量改變合併哲學
-
-在高速吞吐量下：
-- PR 生命周期短
-- 測試 flake 用後續運行修復，而非阻塞
-- 等待昂貴，修正便宜
-
-### 6. 自主權遞進
-
-隨著系統成熟，智慧體可以端到端驅動新功能：
-
-```
-1. 驗證代碼庫現狀
-2. 重現 bug
-3. 實作修復
-4. 驗證修復
-5. 打開 PR
-6. 回應回饋
-7. 合併
-```
-
-## AGENTS.md 最佳實踐
-
-### 不要這樣做
-
-```markdown
-# 1000 行的 AGENTS.md
-- 塞滿所有規則
-- 很快就過時
-- 智慧體無法驗證
-- 變成「吸引人的麻煩」
-```
-
-### 應該這樣做
-
-```markdown
-# AGENTS.md（約 100 行）
-
-## 專案概覽
+## 專案
 [一行描述]
 
 ## 技術棧
@@ -205,95 +105,13 @@ Providers → Service → Runtime → UI
 [List of docs/ files]
 ```
 
-### 機械性強制
+### 3. 機械化執行
 
-```bash
-# CI 工俱驗證知識庫是最新的
-- linter 檢查文件結構
-- 驗證交叉連結
-- 檢查 freshness
-- 「doc-gardening」agent 掃描過時文件
-```
+**文檔會腐爛，lint 規則不會。**
 
-## 垃圾分類（Entropy & Garbage Collection）
-
-問題：智慧體會複製現有模式，即使是不均勻或最佳的。
-
-解決方案：編碼「黃金原則」到倉庫，建構定期清理流程：
-
-```
-1. 偏好共享工具包 over 手寫輔助函式
-2. 不做「YOLO-style」探索資料——驗證邊界或使用類型 SDK
-```
-
-定期執行：
-```markdown
-# background tasks
-- 掃描漂移
-- 更新品質等級
-- 打開重構 PR
-- 大多數可在一分鐘內審查並自動合併
-```
-
-這像垃圾分類：技術債是高利貸，持續償還優於一次還清。
-
-## 層級自主權
-
-```
-Level 0: 人類驅動
-        human -> OpenCode -> PR
-
-Level 1: OpenCode 可自審
-        human -> OpenCode -> review -> PR
-
-Level 2: OpenCode 可處理回饋
-        human -> OpenCode -> feedback -> fix -> PR
-
-Level 3: OpenCode 端到端驅動
-        human -> OpenCode (full loop) -> PR -> merge
-```
-
-## OpenCode 實作範例
-
-### AGENTS.md
-
-```markdown
-# AGENTS.md
-
-## 專案
-這是一個電子商務 API 服務
-
-## 技術棧
-- Framework: Hono
-- Language: TypeScript
-- Database: PostgreSQL + Prisma
-
-## 架構
-分層架構：
-- src/routes/: API 路由
-- src/services/: 業務邏輯
-- src/repositories/: 資料存取
-
-## 目錄結構
-src/
-├── routes/
-├── services/
-├── repositories/
-├── types/
-└── middleware/
-
-## 驗證
-npm run build   # 建置
-npm run lint   # Lint
-npm run test   # 測試
-
-## 約束
-- 禁止直接 import infrastructure/ 到 routes/
-- 新服務放在 src/services/
-- 遵循 src/CONVENTIONS.md
-```
-
-### 自訂 Linter
+- 自訂 linter + 結構測試 = 不變量的守護者
+- lint 錯誤資訊裡內嵌修復指令，智慧體可以自我糾正
+- 在中央層面強制執行邊界，在本地層面允許自主權
 
 ```typescript
 // lint-arch.ts：依賴方向檢查
@@ -320,86 +138,188 @@ export function checkLayerImports(): Violation[] {
 }
 ```
 
-### 品質檢查
+### 4. 智慧體可讀性
+
+**優先為智慧體的推理能力優化。**
+
+- 選「無聊」技術（API 穩定、訓練集覆蓋好）
+- 有時重新 implement 子集比包裝不透明的上游行為更划算
+- 讓應用可以按 git worktree 啟動
+
+```markdown
+# 選擇技術的原則
+1. API 穩定
+2. 訓練集覆蓋好
+3. 組合性高
+4. 可被完全內化和推理
+```
+
+### 5. 吞吐量改變合併理念
+
+**糾錯成本低，等待成本高。**
+
+- PR 生命週期很短
+- 測試偶發失敗通過後續重跑解決
+- 在智慧體吞吐量遠超人類注意力的系統中，這通常是正確的選擇
+
+```markdown
+# 合併哲學
+- 不阻塞：快速疊代優先
+- 短生命：PR 盡快合併
+- 重試：測試失敗用重跑修復
+- 持續：等待是最貴的
+```
+
+### 6. 熵管理 = 垃圾回收
+
+**智慧體會複製倉庫中已有的模式——包括壞模式。**
+
+將「黃金規則」編碼進倉庫，定期後台任務：
+- 掃描偏差
+- 更新品質評分
+- 發起重構 PR
+
+**技術債是高息借貸 — 持續償還優於一次還清。**
+
+```markdown
+# 黃金原則清單
+1. 偏好共享工具包 over 手寫輔助函式
+2. 不做「YOLO-style」探索資料
+3. 結構化日誌是必須的
+4. Schema 和類型有命名規範
+5. 檔案大小有限制
+```
+
+---
+
+## Ralph 六條信條
+
+[Ralph](https://github.com/snarktank/ralph) 是 Harness Engineering 的核心實現框架。
+
+| 信條 | Harness Engineering 對應概念 |
+|------|--------------------------|
+| Fresh Context Is Reliability | 智慧體可讀性 — 每次疊代重新讀取 |
+| Backpressure Over Prescription | 機械化執行 — 不規定怎麼做，但門控拒絕壞結果 |
+| The Plan Is Disposable | 熵管理 — 重新生成的成本只是一次 planning loop |
+| Disk Is State, Git Is Memory | 倉庫即記錄系統 — 檔案是交接機制 |
+| Steer With Signals, Not Scripts | 人類掌舵 — 加路標，不加腳本 |
+| Let Ralph Ralph | 智慧體執行 — 坐在迴圈上，不坐在迴圈裡 |
+
+---
+
+## 控制論視角
+
+根據 [Martin Fowler](https://martinfowler.com/articles/harness-engineering.html)，Harness 是控制論的調節器：
+
+### 兩大控制機制
+
+```
+Feedforward（引導）：在行動前預防問題
+  - AGENTS.md、Skills、Linter
+
+Feedback（感測）：在行動後修正問題
+  - 測試、審查、日誌、自動化驗證
+```
+
+### 三種約束類別
+
+| 類別 | 說明 |
+|------|------|
+| 可維護性 | 程式碼品質、重複、複雜度 |
+| 架構適應性 | 分層架構、依賴方向 |
+| 行為 | 功能規格、測試驗證 |
+
+### 計算型 vs 推理型
+
+| 類型 | 費用 | 速度 | 確定性 |
+|------|------|------|--------|
+| 計算型 | 低 | 快 | 高 |
+| 推理型 | 高 | 慢 | 低 |
+
+---
+
+## OpenCode 實作
+
+### AGENTS.md
+
+```markdown
+# AGENTS.md
+
+## 專案
+這是一個電子商務 API 服務
+
+## 技術棧
+- Framework: Hono
+- Language: TypeScript
+- Database: PostgreSQL + Prisma
+
+## 架構
+分層架構：
+- src/routes/: API 路由
+- src/services/: 業務邏輯
+- src/repositories/: 資料存取
+
+## 約束
+- 禁止直接 import infrastructure/ 到 routes/
+- 新服務放在 src/services/
+- 遵循 src/CONVENTIONS.md
+
+## 驗證
+npm run build   # 建置
+npm run lint   # Lint
+npm run test   # 測試
+```
+
+### 自訂 Linter
 
 ```typescript
-// scripts/quality-check.ts
-export async function runQualityChecks(): Promise<QualityResult> {
-  const results = {
-    lint: await runLinter(),
-    typeCheck: await runTypeChecker(),
-    test: await runTests(),
-    architecture: checkLayerImports(),
-    complexity: checkCyclomaticComplexity()
-  }
-  
-  return {
-    passed: allPassed(results),
-    details: results
-  }
+// lint-arch.ts
+export function checkNoInfrastructureInRoutes(): Violation[] {
+  return allFiles
+    .filter(f => f.path.startsWith('src/routes/'))
+    .filter(f => f.imports.some(i => i.path.includes('infrastructure/')))
+    .map(f => ({
+      file: f.path,
+      message: 'routes/ cannot import infrastructure/'
+    }))
 }
 ```
 
-## OpenCode 中的 Harness 實作
-
-### 1. 建立 AGENTS.md
-
-```markdown
-"請為這個專案建立 AGENTS.md：
-- 專案描述：REST API 服務
-- 技術棧：TypeScript + Hono + Prisma
-- 架構：Clean Architecture
-- 驗證命令：npm run build && npm run test"
-```
-
-### 2. 建立 Linter 規則
-
-```markdown
-"請建立 custom linter 規則：
-- 禁止从 routes/ 直接 import infrastructure/
-- 強制錯誤類型使用 Error 類別
-- 強制有 JSDoc 注釋
-- 違反時顯示清楚的錯誤訊息"
-```
-
-### 3. 建立品質檢查
+### 品質檢查
 
 ```markdown
 "請建立品質檢查指令：
-1. 執行 npm run lint
-2. 執行 npm run type-check
+1. npm run lint
+2. npm run type-check
 3. 執行測試
 4. 檢查複雜度
 5. 輸出整體評分"
 ```
 
-## 黃金原則清單
+---
 
-1. 共享工具包優先於重複程式碼
-2. 邊界驗證或類型 SDK，絕不「猜測」
-3. 結構化日誌是必須的
-4. Schema 和類型有命名規範
-5. 檔案大小有限制
-6. 平臺可靠性要求
-
-## 與上下文工程的關係
+## 與其他工程的關係
 
 ```
-Prompt 工程 → 問什麼（說清楚）
-Context 工程 → 給什麼（喂對）
-Harness 工程 → 整個系統怎麼跑（管得住）
+Prompt 工程     → 問什麼（說清楚）
+Context 工程   → 給什麼（喂對）
+Harness 工程  → 整個系統怎麼跑（管得住）
 ```
 
-Harness 是上下文工程的具體形式，專注於讓智慧體可靠工作。
+Harness 是 Prompt 和 Context 工程的具體形式，專注於讓智慧體可靠工作。
+
+---
 
 ## 相關資源
 
-- [OpenAI: Harness engineering](https://openai.com/index/harness-engineering/)
-- [Martin Fowler: Harness engineering](https://martinfowler.com/articles/harness-engineering.html)
+- [OpenAI: Harness Engineering](https://openai.com/index/harness-engineering/)
+- [deusyu/harness-engineering](https://github.com/deusyu/harness-engineering)
+- [Ralph Framework](https://github.com/snarktank/ralph)
+- [Martin Fowler: Harness Engineering](https://martinfowler.com/articles/harness-engineering.html)
 - 相關概念：[Prompt工程](Prompt工程.md)
 - 相關概念：[Context工程](Context工程.md)
 - 相關概念：[Skill文檔](Skill文檔.md)
 
 ## Tags
 
-#Harness #馭繮工程 #AI工程 #智慧體 #OpenCode #代理工程
+#Harness #馭繮工程 #AI工程 #智慧體 #OpenCode #Ralph

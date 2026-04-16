@@ -6,14 +6,16 @@ Skill 是 Claude Code 推出的擴展機制，將領域知識和專業能力封�
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    CLaude Code 擴展機制                         │
+│                    Claude Code 擴展機制                         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  MCP Servers  → 新增工具（需要知道存在）                    │
+│  MCP Servers     → 新增工具（需要知道存在）                    │
 │     ↓                                                    │
 │  Slash Commands → 預定義 Prompt（手動呼叫）              │
 │     ↓                                                    │
-│  Skills → 領域知識（自動發現）                        │
+│  Skills       → 領域知識（自動發現）                        │
+│     ↓                                                    │
+│  CLAUDE.md    → 基本規則（始終載入）                   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -40,6 +42,11 @@ Skill = 專業知識 + 執行指引 + 輔助工具
 | Skills | 自動發現 | 領域知識注入 |
 | CLAUDE.md | 總是載入 | 專案基本資訊 |
 
+### 與 KarpathySkill 的關係
+
+- [KarpathySkill](KarpathySkill.md) - 基於 Karpathy 四原則的編碼指南
+- Skill 文檔 - Claude Code 的 Skill 擴展機制說明
+
 ## Skill 資料夾結構
 
 ```
@@ -48,7 +55,6 @@ Skill = 專業知識 + 執行指引 + 輔助工具
 │   ├── SKILL.md           # 必需：Skill 定義
 │   ├── extract_text.ts   # 可選：輔助腳本
 │   └── templates/       # 可選：資源
-│       └── summary.html
 ├── csv/
 │   └── SKILL.md
 └── xlsx/
@@ -83,10 +89,8 @@ model: claude-sonnet-4-20250514
 | `version` | 否 | 版本號 |
 | `allowed-tools` | 否 | 允許的工具列表 |
 | `model` | 否 | 指定使用的模型 |
-| `disable-model-invocation` | 否 | 禁止模型調用 |
-| `mode` | 否 | 執行模式 |
 
-### 指令主體
+### 指令主體範例
 
 ```yaml
 ---
@@ -96,12 +100,6 @@ allowed-tools: Read,Grep,Glob,Bash
 ---
 
 # Code Reviewer Skill
-
-## 何時使用
-當用戶要求：
-- 代碼審查
-- 檢查程式碼品質
-- 找出潛在問題
 
 ## 審查標準
 
@@ -126,7 +124,6 @@ allowed-tools: Read,Grep,Glob,Bash
 
 ### 問題清單
 1. [檔案:行號] 問題描述
-2. ...
 
 ### 建議
 - 改進建議 1
@@ -151,9 +148,12 @@ allowed-tools: Read,Grep,Glob,Bash
 .claude/skills/
 ```
 
-### 3. API 上傳
+### 3. Claude Code Plugin
 
-透過 API 上傳自訂 Skill。
+```
+/plugin marketplace add <owner>/<repo>
+/plugin install <repo>@<skill>
+```
 
 ## 預設 Skills
 
@@ -219,10 +219,9 @@ export function main(): number {
 
 ### 關鍵機制
 
-Claude 不使用演算法路由或意圖分類來決定載入哪個 Skill。而是將所有可用 Skills 格式化後嵌入工具定義中，讓模型自行判斷。
+Claude 不使用演算法路由來決定載入哪個 Skill。而是將所有可用 Skills 格式化後嵌入工具定義中，讓模型自行判斷。
 
 ```typescript
-// Claude Code 內部
 const availableSkills: Skill[] = []
 for (const skillFolder of skillDirectories) {
   const skillMd = readFile(`${skillFolder}/SKILL.md`)
@@ -236,7 +235,7 @@ for (const skillFolder of skillDirectories) {
 
 ## OpenCode 實作範例
 
-### 範例 1：安全審計 Skill
+### 建立安全審計 Skill
 
 ```yaml
 ---
@@ -266,30 +265,9 @@ allowed-tools: Read,Grep,Glob,Bash
 ### 3. 輸入驗證
 - SQL 注入防護
 - XSS 防護
-
-### 4. 敏感資料
-- API Keys
-- 密碼
-- 個人資訊
-
-## 輸出
-
-```markdown
-## 安全審計報告
-
-### 高風險
-| 檔案 | 問題 | 嚴重性 |
-|------|------|--------|
-
-### 中風險
-...
-
-### 建議
-...
-```
 ```
 
-### 範例 2：測試生成 Skill
+### 建立測試生成 Skill
 
 ```yaml
 ---
@@ -314,68 +292,18 @@ allowed-tools: Read,Write,Bash,Glob
 ### 整合測試
 - API endpoint 測試
 - 資料庫互動
-
-### E2E 測試
-- 完整使用者流程
-- 瀏覽器自動化
-
-## 生成模板
-
-```typescript
-import { describe, it, expect } from 'vitest'
-
-describe('UserService', () => {
-  it('should find user by id', async () => {
-    // Arrange
-    const userId = '123'
-    
-    // Act
-    const user = await userService.findById(userId)
-    
-    // Assert
-    expect(user).toBeDefined()
-    expect(user.id).toBe(userId)
-  })
-})
-```
-```
-
-### 範例 3：API 文件生成 Skill
-
-```yaml
----
-name: api-docs-generator
-description: 從程式碼生成 API 文件
-allowed-tools: Read,Write,Grep,Glob
----
-
-# API Docs Generator
-
-## 何時使用
-- 要求生成 API 文件
-- 更新文件
-- 建立 Swagger/OpenAPI
-
-## 處理流程
-
-1. 讀取所有路由檔案
-2. 解析 JSDoc 注釋
-3. 提取類型定義
-4. 生成 Markdown 或 OpenAPI spec
 ```
 
 ## Best Practices
 
 ### 1. Progressive Disclosure
 
-不要在一個 Skill 中塞入所有資訊：
-
 ```yaml
 # ❌ 不好：太长
-description: 可以做很多事情，包括 A、B、C、D...
+description: 可以做很多事情...
 
 # ✅ 好：簡潔明確
-description: 生成單元測試，使用 vitest 和 Mock
+description: 生成單元測試，使用 pytest 和 Mock
 ```
 
 ### 2. 清晰的觸發條件
@@ -396,9 +324,6 @@ description: 生成單元測試，使用 vitest 和 Mock
 ```yaml
 file: tests/test_xxx.ts
 coverage: 80%
-cases:
-  - name: 登入成功
-  - name: 登入失敗
 ```
 ```
 
@@ -410,29 +335,6 @@ allowed-tools: Read,Write,Glob,Grep
 
 # 避免過度權限
 # ❌ allowed-tools: *
-```
-
-## OpenCode 中使用 Skills
-
-### 在 OpenCode 中建立 Skill
-
-```markdown
-"請建立一個安全審計 Skill：
-
-1. 建立 .claude/skills/security-auditor/ 目錄
-2. 建立 SKILL.md，包含：
-   - name: security-auditor
-   - description: 執行安全審計
-   - allowed-tools: Read,Grep,Glob,Bash
-3. 檢查項目：SQL injection, XSS, 認證
-4. 輸出格式：Markdown 報告
-"
-```
-
-### 使用預設 Skill
-
-```markdown
-"請使用 pdf skill 處理這個文件：[檔案路徑]"
 ```
 
 ## 常見問題
@@ -453,16 +355,13 @@ Use the xxx skill to...
 
 ### Q: 多個 Skill 如何選擇？
 
-Claude 會根據 description 自動選擇最相關的。可以明確指定。
+Claude 會根據 description 自動選擇最相關的。
 
 ## 相關資源
 
 - [Claude Code Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)
-- [Claude Code Skill Factory](https://github.com/alirezarezani/claude-code-skill-factory)
-- [Claude Code Tresor](https://github.com/alirezarezani/claude-code-tresor)
-- 相關概念：[Harness工程](Harness工程.md)
-- 相關概念：[Agent發展史](Agent發展史.md)
+- [KarpathySkill](KarpathySkill.md) - Karpathy 四原則
 
 ## Tags
 
-#Skill #Claude #擴展 #領域知識 #自動化 #OpenCode
+#Skill #Claude #擴展 #領域知識

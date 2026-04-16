@@ -2,7 +2,17 @@
 
 ## 概述
 
-上下文工程是設計和管理與 AI 模型互動時的上下文（Context）策略，最大化模型對任務的理解和表現。是 Prompt 工程的延伸，專注於資訊的組織和呈現方式。
+上下文工程是設計和管理與 AI 智慧體互動時的上下文策略，最大化模型對任務的理解和表現。是 Prompt 工程的延伸，專注於資訊的組織和呈現方式。
+
+根據 [Prompt Engineering Guide](https://www.promptingguide.ai/agents/context-engineering)，上下文工程是構建可靠 AI 智慧體的關鍵實踐。
+
+## 為什麼需要上下文工程
+
+構建有效的 AI 智慧體需要大量的上下文調整。過程包括：
+- 系統提示設計和優化
+- 工具定義和使用說明
+- 智慧體架構和通訊模式
+- 輸入/輸出規範
 
 ## Context 的組成
 
@@ -21,117 +31,284 @@
 │  │ 任務描述、成功標準、預期輸出格式                      │  │
 │  └─────────────────────────────────────────────────────┘  │
 │                         ↓                                   │
-│  World Context                                             │
+│  Tool Context                                             │
 │  ┌─────────────────────────────────────────────────────┐  │
-│  │ 程式碼庫結構、相關檔案、領域知識                     │  │
+│  │ 工具描述、使用時機、錯誤處理                          │  │
 │  └─────────────────────────────────────────────────────┘  │
 │                         ↓                                   │
-│  Session Context                                           │
+│  Memory Context                                           │
 │  ┌─────────────────────────────────────────────────────┐  │
-│  │ 對話歷史、已確定的決策、相關約束                     │  │
+│  │ 對話歷史、任務狀態、學習記錄                          │  │
 │  └─────────────────────────────────────────────────────┘  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 上下文管理策略
+---
 
-### 1. RAG (Retrieval Augmented Generation)
+## 核心問題與解決方案
+
+### Issue 1: 不完整的任務執行
+
+**問題**：智慧體經常建立多個搜索任務，��只執行部分，默默跳過其餘的。
+
+**根因**：系統提示缺乏明確的任務完成要求。
+
+**解決方案**：
 
 ```markdown
-# 在 OpenCode 中使用 RAG
-"基於以下程式碼上下文回答問題：
+# 嚴格方式
+你必須為每個建立的搜索任務執行網路搜索。
+不要默默跳過任何任務。
 
-## 檢索到的相關程式碼
-
-### src/services/userService.ts
-[程式碼內容]
-
-### src/types/user.ts
-[類型定義]
-
-問題: 如何實作用戶認證？
-
-請基於上述程式碼给出解決方案。"
+# 靈活方式
+允許智慧體決定哪些搜索是必要的，但要求明確說明跳過的原因。
 ```
 
-### 2. 對話歷史管理
+### Issue 2: 缺乏除錯可見性
+
+**問題**：難以理解智慧體為何做出某些決定。
+
+**解決方案**：實現任務管理系統：
 
 ```markdown
-# 在 OpenCode 中使用對話歷史
-"根據之前的討論，我們已經：
-- 確認使用 JWT 認證
-- 建立 UserService
-- 需要實作登入 API
+# 任務追蹤器格式
+| Task ID | Search Query | Status | Results | Timestamp |
+|--------|-------------|--------|---------|-----------|
+| 1      | 查詢內容     | todo   | -        | -         |
+| 2      | 查詢內容     | done   | 結果摘要 | 時間     |
+```
 
-請繼續實作登入 API：
-- 驗證用戶 credential
-- 回傳 JWT token
-- 處理錯誤情況
+---
+
+## 上下文工程最佳實踐
+
+### 1. 消除提示歧義
+
+```markdown
+# ❌ 不好
+"做些研究並創建報告。"
+
+# ✅ 好
+"通過以下步驟執行研究：
+1. 將查詢分解為 3-5 個具體搜索任務
+2. 為每個任務執行網路搜索
+3. 將每個搜索的發現記錄到任務追蹤器
+4. 將所有發現綜合成結構化報告，包含：
+   - 執行摘要
+   - 每個搜索任務的關鍵發現
+   - 結論和見解
 "
 ```
 
-### 3. 分塊策略 (Chunking)
+### 2. 明確期望
+
+不要假設智慧體知道你想要什麼。明確說明：
+- 必要 vs 可選的動作
+- 質量標準
+- 輸出格式
+- 決策標準
+
+### 3. 實現可觀測性
+
+將除錯機制構建到智慧體系統中：
+- 記錄所有智慧體的決策和推理
+- 在外部存儲中追蹤狀態變化
+- 記錄工具調用及其結果
+- 捕獲錯誤和邊緣情況
+
+### 4. 基於行為疊代
+
+上下文工程是一個疊代過程：
+
+```
+1. 部署：使用初始上下文啟動智慧體
+2. 觀察：在生產中觀察實際行為
+3. 識別：識別與預期行為的偏差
+4. 優化：優化系統提示和約束
+5. 測試：測試並驗證改進
+6. 重複
+```
+
+### 5. 平衡靈活性和約束
+
+考慮取捨：
+- **嚴格約束**：更可預測但不太靈活
+- **靈活指南**：更靈活但可能不一致
+
+根據你的用例需求選擇。
+
+---
+
+## 進階技巧
+
+### 分層上下文架構
+
+將上下文組織為分層結構：
+
+```
+1. System Layer:   核心身份和能力
+2. Task Layer:   當前任務的指令
+3. Tool Layer:   每個工具的描述和使用指南
+4. Memory Layer: 相關的歷史上下文和學習
+```
+
+### 動態上下文調整
+
+根據以下動態調整上下文：
+- 任務複雜度
+- 可用資源
+- 先前執行歷史
+- 錯誤模式
+
+### 上下文驗證
+
+在部署前驗證上下文設計：
+- **完整性**：是否覆蓋所有重要場景？
+- **清晰度**：是否無歧義？
+- **一致性**：不同部分是否對齊？
+- **可測試性**：能否驗證行為？
+
+---
+
+## 智慧體架構設計
+
+### 原始設計問題
+
+單一智慧體架構將太多負擔放在一個智慧體上：
+- 管理任務
+- 保存資訊到記憶體
+- 執行搜索
+- 生成最終報告
+
+**後果**：
+- 上下文變得太長
+- 智慧體忘記執行搜索
+- 錯過任務更新
+- 不同查詢的行為不可靠
+
+### 改進的多智慧體架構
+
+分離關注點：
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│ Deep Research   │     │ Search Worker   │
+│ Agent          │────▶│ Agent           │
+│ (規劃+協調)    │     │ (專注搜索)       │
+└─────────────────┘     └─────────────────┘
+```
+
+**好處**：
+1. 分離關注點
+2. 提高可靠性
+3. 模型選擇靈活性
+
+---
+
+## 系統提示工程
+
+### 高層定義
 
 ```markdown
-# 在 OpenCode 中依賴上下文建立程式碼
-"請建立 OrderService：
-
-## 參考的現有服務
-
-### UserService (已建立)
-```typescript
-export class UserService {
-  async findById(id: string): Promise<User>
-  async create(data: CreateUserDTO): Promise<User>
-}
+你是一個深度研究智慧體，負責規劃和執行搜索任務以生成深���研��報告。
 ```
 
-### ProductService (已建立)
-```typescript
-export class ProductService {
-  async findById(id: string): Promise<Product>
-  async findAll(): Promise<Product[]>
-}
-```
-
-請參考上述模式建立 OrderService。"
-```
-
-## 上下文最佳化
-
-### 1. 相關性檢索
+### 一般指令
 
 ```markdown
-# 指定具體範圍
-"請查看：
-- 只需要 src/services/ 目錄
-- 相關的 types 在 src/types/
-- 不要查看 tests/ 目錄
+## GENERAL INSTRUCTIONS
 
-問題：現有的認證機制是什麼？"
+用戶將提供查詢，你將把該查詢轉換為包含多個搜索任務的搜索計劃。
+你將執行每個搜索任務並在電子表格中維護這些搜索的狀態。
+然後，你將為用戶生成最終的深度研究報告。
 ```
 
-### 2. 上下文視窗管理
+### 提供必要的上下文
 
 ```markdown
-# 限制上下文範圍
-"由於代碼較長，請：
-1. 先閱讀 index.ts 了解整體結構
-2. 閱讀 exports 的主要服務
-3. 不要全部閱讀，只看相關部分
+# 當前日期資訊（關鍵！）
+For context, today's date is: {{ $now.format('yyyy-MM-dd') }}
 
-然後回答：如何新增一個 API endpoint？"
+為什麼這很重要：
+- LLMs 通常有知識截止日期
+- 沒有當前日期上下文，智慧體經常搜索過時的資訊
+- 這確保智慧體理解「最新新聞」等查詢的時間上下文
 ```
 
-## OpenCode 上下文管理實作
-
-### 1. 使用 CLAUDE.md
+### 工具定義和使用說明
 
 ```markdown
-# CLAUDE.md 內容範例
-"""
-# 專案資訊
+## TOOL DESCRIPTIONS
+
+Planning tasks: 
+使用 append_update_task 工具創建搜索計劃並添加到 Google Sheet。
+確保在完成每個搜索後更新每個任務的狀態。
+每個任務從 todo 狀態開始，一旦搜索工作者返回信息就會更新為 "done" 狀態。
+
+Executing tasks: 
+使用 Search Worker Agent 工具執行搜索計劃。
+```
+
+### 錯誤處理
+
+```markdown
+ERROR HANDLING:
+- 如果搜索失敗，用重新措辭的查詢重試一次
+- 如果重試失敗，記錄失敗並繼續執行剩餘任務
+- 如果超過 50% 的搜索失敗，提醒用戶並請求指導
+- 永遠不要完全停止執行而不通知用戶
+```
+
+---
+
+## 常見陷阱
+
+### 1. 過度約束
+
+**問題**：太多規則使智慧體無法靈活處理邊緣情況。
+
+```markdown
+# ❌ 不好
+NEVER skip a search task.
+ALWAYS perform exactly 3 searches.
+NEVER combine similar queries.
+
+# ✅ 好
+Aim to perform searches for all planned tasks. If you determine that tasks are redundant, consolidate them before execution and document your reasoning.
+```
+
+### 2. 規範不足
+
+**問題**：模糊的指令導致不可預測的行為。
+
+### 3. 忽略錯誤情況
+
+**問題**：上下文沒有指定出錯時的行為。
+
+---
+
+## 測量標準
+
+追蹤這些指標來評估上下文工程的有效性：
+
+1. **任務完成率**：成功完成的任務百分比
+2. **行為一致性**：相似輸入的行為相似度
+3. **錯誤率**：失敗和意外行為的頻率
+4. **用戶滿意度**：輸出的質量和有用性
+5. **除錯時間**：識別和修復問題所需的時間
+
+---
+
+## OpenCode 上下文工程
+
+### 使用 CLAUDE.md
+
+```markdown
+# CLAUDE.md
+
+## 專案
+[名稱] - [描述]
 
 ## 技術棧
 - TypeScript
@@ -139,47 +316,38 @@ export class ProductService {
 - PostgreSQL
 
 ## 架構
-- 使用 Clean Architecture
-- src/domain: 領域模型
-- src/application: 應用服務
-- src/infrastructure: 基礎設施
+分層架構：
+- src/domain/: 領域模型
+- src/application/: 應用服務
+- src/infrastructure/: 基礎設施
 
 ## 約定
 - 所有服務使用 async/await
 - 錯誤使用 Error 類別
 - 使用 JWT token 認證
-
-## 常用指令
-- npm run dev: 開發伺服器
-- npm run test: 執行測試
-"""
 ```
 
-### 2. 使用 Context 引導
+### 使用上下文引導
 
 ```markdown
-# 在對話中提供上下文
+# 提供上下文
 "在我們的專案中：
 - 已有 UserService in src/services/userService.ts
 - 使用 Prisma ORM
 - 資料庫是 PostgreSQL
 
-請建立 OrderService，要求：
+請建立 OrderService：
 - 參考 UserService 的模式
 - 使用 Prisma
-- 建立对应的 API
-"
+- 建立對應的 API"
 ```
 
-### 3. 分層上下文
+### 分層上下文
 
 ```markdown
 # 分層提供上下文
 "## 層 1: 專案結構
 位置: src/
-├── domain/
-├── application/
-└── infrastructure/
 
 ## 層 2: 相關檔案
 - UserService: src/application/userService.ts
@@ -188,124 +356,18 @@ export class ProductService {
 ## 層 3: 具體需求
 - 建立 OrderService
 - 需要包含 CRUD
-- 使用現有的 Repository 模式
-"
+- 使用現有的 Repository 模式"
 ```
 
-## 上下文工程最佳實踐
-
-| 原則 | 說明 |
-|------|------|
-| 精確相關 | 只包含與當前任務相關的資訊 |
-| 結構清晰 | 使用標題、分隔符號組織資訊 |
-| 優先排序 | 最重要資訊放在前面 |
-| 及時清理 | 移除不再需要的上下文 |
-| 版本控制 | 追蹤上下文變化 |
-
-## OpenCode 實作範例
-
-### 1. 建立功能時的上下文
-
-```markdown
-# 在建立功能前提供上下文
-"## 現有程式碼
-
-### 現有服務模式
-src/services/userService.ts:
-```typescript
-export class UserService {
-  constructor(private repo: UserRepository) {}
-  
-  async findById(id: string): Promise<User> {
-    return this.repo.findById(id)
-  }
-  
-  async create(data: CreateUserDTO): Promise<User> {
-    return this.repo.create(data)
-  }
-}
-```
-
-### 現有 Repository 模式
-src/repositories/userRepository.ts:
-```typescript
-export class UserRepository {
-  async findById(id: string): Promise<User | null>
-  async create(data: CreateUserDTO): Promise<User>
-}
-```
-
-請建立 OrderService 和 OrderRepository，遵循現有模式。"
-```
-
-### 2. 查詢時的上下文
-
-```markdown
-# 查詢時的上下文
-"## 查詢範圍
-- src/services/*.ts: 現有服務
-- src/types/*.ts: 類型定義
-
-## 需要查���
-- 認證相關的程式碼
-- API middleware
-
-請找出：現有的認證機制如何處理 JWT？"
-```
-
-### 3. 重構時的上下文
-
-```markdown
-# 重構時提供完整的上下文
-"## 現有程式碼
-位置: src/utils/legacyAuth.ts
-
-```typescript
-// 舊的認證邏輯
-function auth(req) {
-  // ...
-}
-```
-
-## 目標
-- 使用 OpenCode 的新認證模式
-- 保持相同的 API
-
-## 約束
-- 不要改變 API 介面
-- 保持向後相容
-
-請重構為新的架構。"
-```
-
-## 評估指標
-
-```markdown
-# 評估上下文品質
-"評估以下上下文的品質：
-
-## 提供的上下文
-- 專案結構
-- 相關服務
-- 類型定義
-
-## 任務
-建立新功能
-
-## 評估標準
-1. relevance: 上下文與任務相關性
-2. coverage: 是否覆蓋所需資訊
-3. conciseness: 是否簡潔
-4. effectiveness: 任務完成效果
-"
-```
+---
 
 ## 相關資源
 
+- [Prompt Engineering Guide: Context Engineering](https://www.promptingguide.ai/agents/context-engineering)
+- [Prompt Engineering Guide: Context Engineering Deep Dive](https://www.promptingguide.ai/agents/context-engineering-deep-dive)
 - 相關概念：[Prompt工程](Prompt工程.md)
-- 相關概念：[Harness Engineering](Harness工程.md)
-- 相關概念：[Skill文檔](Skill文檔.md)
+- 相關概念：[Harness工程](Harness工程.md)
 
 ## Tags
 
-#Context #上下文工程 #RAG #LLM #資訊檢索 #OpenCode
+#Context #上下文工程 #RAG #LLM #資訊檢索 #AI Agents #OpenCode
