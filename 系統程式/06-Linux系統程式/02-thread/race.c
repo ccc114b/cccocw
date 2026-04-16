@@ -7,7 +7,7 @@ int counter = 0;
 void *inc()
 {
   for (int i=0; i<LOOPS; i++) {
-    counter = counter + 1;
+    counter = counter + 1; // LOAD R1, counter; R1=R1+1; STORE R1, counter
   }
   return NULL;
 }
@@ -15,7 +15,7 @@ void *inc()
 void *dec()
 {
   for (int i=0; i<LOOPS; i++) {
-    counter = counter - 1;
+    counter = counter - 1; // LOAD R1, counter; R1=R1-1; STORE R1, counter
   }
   return NULL;
 }
