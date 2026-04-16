@@ -103,7 +103,10 @@ class Agent:
     async def think(self, context: str) -> str:
         full_context = self.get_context()
         full_prompt = f"{full_context}\n\n{context}" if full_context else context
-        return await call_ollama(full_prompt, self.system)
+        try:
+            return await call_ollama(full_prompt, self.system)
+        except Exception as e:
+            raise Exception(f"[{self.name}] 思考失敗：{e}")
 
     async def remember(self, user_msg: str, assistant_msg: str):
         prompt = f"""根據這段對話，有沒有需要長期記憶的關鍵資訊？
@@ -632,8 +635,11 @@ class UserAgent(Agent):
             if user_input.lower().startswith("/init"):
                 parts = user_input.split(maxsplit=1)
                 target_dir = parts[1].strip() if len(parts) > 1 else cwd
-                result = asyncio.run(self._init_project(target_dir))
-                print(f"\n{result}\n")
+                try:
+                    result = asyncio.run(self._init_project(target_dir))
+                    print(f"\n{result}\n")
+                except Exception as e:
+                    print(f"\n⚠️  錯誤：{e}\n")
                 continue
             if user_input.lower() == "/new":
                 print(f"\n{self._new_session()}\n")
@@ -651,5 +657,8 @@ class UserAgent(Agent):
                 print(">>> 切換至 Plan Mode\n")
                 continue
 
-            response = asyncio.run(self.chat(user_input))
-            print(f"\n🤖 [{self.mode.upper()}] {response}\n")
+            try:
+                response = asyncio.run(self.chat(user_input))
+                print(f"\n🤖 [{self.mode.upper()}] {response}\n")
+            except Exception as e:
+                print(f"\n⚠️  錯誤：{e}\n")
