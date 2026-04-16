@@ -4,6 +4,7 @@
 
 ## 概念
 
+- [機器學習的歷史](機器學習的歷史.md) - 從符號 AI 到深度學習的演進 | tags: AI, 神經網路
 - [監督式學習](監督式學習.md) - 從標記資料學習預測 | tags: 分類, 回歸
 - [非監督式學習](非監督式學習.md) - 從無標記資料發現模式 | tags: 聚類, 降維
 - [深度學習](深度學習.md) - 多層神經網路的學習方法 | tags: CNN, RNN, Transformer
@@ -21,6 +22,14 @@
 
 ## 主題
 
+- [模型評估](模型評估.md) - 機器學習效能度量與驗證策略 | tags: AUC, 交叉驗證, 混淆矩陣
+- [損失函數](損失函數.md) - 模型訓練的優化目標函數 | tags: Cross-Entropy, MSE, Focal Loss
+- [正則化](正則化.md) - 防止過擬合的核心技術 | tags: L1, L2, Dropout, 早停
+- [自然語言處理](自然語言處理.md) - 文本理解與生成技術 | tags: Tokenization, Word2Vec, Transformer
+- [電腦視覺](電腦視覺.md) - 圖像理解與分析技術 | tags: CNN, 物體偵測, 語義分割
+- [異常偵測](異常偵測.md) - 識別偏離正常模式的數據 | tags: One-Class, Isolation Forest, Autoencoder
+- [推薦系統](推薦系統.md) - 個性化推薦核心技術 | tags: 協同過濾, Matrix Factorization
+- [聯邦學習](聯邦學習.md) - 保護隱私的分散式學習 | tags: FedAvg, 差分隱私
 - [線性回歸](線性回歸.md) - 連續值預測的基礎方法 | tags: 正則化, Ridge, Lasso
 - [卷積神經網路](卷積神經網路.md) - 處理網格結構資料 | tags: 圖像, 捲積, 池化
 - [循環神經網路](循環神經網路.md) - 處理序列資料 | tags: LSTM, GRU, 時序
