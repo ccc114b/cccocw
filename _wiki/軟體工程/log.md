@@ -1,5 +1,34 @@
 # 日誌
 
+## [2026-04-16] rewrite | AI 軟體工程系列
+
+- 重寫 Prompt工程.md：改用 OpenCode 範例
+- 重寫 Context工程.md：改用 OpenCode 上下文管理
+- 重寫 Harness工程.md：改用 OpenCode/Claude Code 範例
+- 重寫 Skill文檔.md：改用 TypeScript 範例
+- 重寫 Agent發展史.md：加入 OpenCode/Hermes Agent
+
+## [2026-04-16] add | Skill文檔
+
+- 新增 Skill文檔.md
+- 介紹 Claude Code 的 Skill 擴展機制
+- 包含 SKILL.md 格式、建立範例
+- 更新 index.md
+
+## [2026-04-16] add | Agent發展史
+
+- 新增 Agent發展史.md
+- 組織 Prompt/Context/Harness/Agent 發展脈絡
+- 以 Agent 視角呈現演進關係
+- 更新 index.md
+
+## [2026-04-16] rewrite | Harness工程
+
+- 基於 YouTube 影片和網路資源重寫 Harness工程.md
+- 更新為馭繮工程取向（而非測試架構）
+- 新增六大核心元件、四 大核心原則
+- 更新 index.md
+
 ## [2026-04-07] add | AI 軟體工程
 
 - 新增 Prompt工程 - 提示詞設計、Few-shot、Chain-of-Thought

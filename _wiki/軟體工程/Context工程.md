@@ -38,209 +38,158 @@
 
 ### 1. RAG (Retrieval Augmented Generation)
 
-```python
-from langchain import OpenAI, VectorDBQA
-from langchain.embeddings import OpenAIEmbeddings
+```markdown
+# 在 OpenCode 中使用 RAG
+"基於以下程式碼上下文回答問題：
 
-class CodebaseRAG:
-    def __init__(self, codebase_path: str):
-        self.codebase = CodebaseIndexer(codebase_path)
-        self.embeddings = OpenAIEmbeddings()
-    
-    def get_context(self, query: str, max_tokens: int = 4000) -> str:
-        # 1. 檢索相關程式碼
-        relevant_docs = self.codebase.search(query, top_k=5)
-        
-        # 2. 按相關性排序
-        relevant_docs.sort(key=lambda d: d.score, reverse=True)
-        
-        # 3. 截斷至 token 限制
-        context = ""
-        for doc in relevant_docs:
-            if len(context) + len(doc.content) < max_tokens:
-                context += f"\n\n{doc.metadata}\n{doc.content}"
-        
-        return context
-    
-    def query(self, question: str) -> str:
-        context = self.get_context(question)
-        prompt = f"""根據以下程式碼上下文回答問題：
+## 檢索到的相關程式碼
 
-{context}
+### src/services/userService.ts
+[程式碼內容]
 
-問題: {question}
+### src/types/user.ts
+[類型定義]
 
-回答:"""
-        return llm(prompt)
+問題: 如何實作用戶認證？
+
+請基於上述程式碼给出解決方案。"
 ```
 
 ### 2. 對話歷史管理
 
-```python
-class ConversationManager:
-    def __init__(self, max_turns: int = 10):
-        self.messages = []
-        self.max_turns = max_turns
-        self.summary_history = []
-    
-    def add_message(self, role: str, content: str):
-        self.messages.append({"role": role, "content": content})
-        
-        # 定期摘要
-        if len(self.messages) > self.max_turns:
-            self._summarize_and_compress()
-    
-    def _summarize_and_compress(self):
-        # 將前半部分摘要
-        old_messages = self.messages[:len(self.messages)//2]
-        summary_prompt = "摘要以下對話的要點：\n" + "\n".join(
-            f"{m['role']}: {m['content'][:200]}" for m in old_messages
-        )
-        summary = llm(summary_prompt)
-        
-        # 替換為摘要
-        self.summary_history.append(summary)
-        self.messages = self.messages[len(old_messages):]
-    
-    def get_context_window(self) -> list[dict]:
-        return self.summary_history + self.messages
+```markdown
+# 在 OpenCode 中使用對話歷史
+"根據之前的討論，我們已經：
+- 確認使用 JWT 認證
+- 建立 UserService
+- 需要實作登入 API
+
+請繼續實作登入 API：
+- 驗證用戶 credential
+- 回傳 JWT token
+- 處理錯誤情況
+"
 ```
 
 ### 3. 分塊策略 (Chunking)
 
-```python
-class CodeChunker:
-    def chunk_by_function(self, code: str) -> list[dict]:
-        """按函式分塊"""
-        tree = ast.parse(code)
-        chunks = []
-        
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                chunk_code = ast.get_source_segment(code, node)
-                chunks.append({
-                    "type": "function",
-                    "name": node.name,
-                    "content": chunk_code,
-                    "docstring": ast.get_docstring(node)
-                })
-        return chunks
-    
-    def chunk_by_file(self, repo_path: str) -> list[dict]:
-        """按檔案分塊"""
-        chunks = []
-        for filepath in glob(f"{repo_path}/**/*.py", recursive=True):
-            with open(filepath) as f:
-                chunks.append({
-                    "type": "file",
-                    "path": filepath,
-                    "content": f.read()
-                })
-        return chunks
-    
-    def smart_chunk(self, code: str, max_lines: int = 100) -> list[str]:
-        """智能分塊，保留語義完整性"""
-        lines = code.split('\n')
-        chunks = []
-        current_chunk = []
-        current_lines = 0
-        
-        for i, line in enumerate(lines):
-            current_chunk.append(line)
-            current_lines += 1
-            
-            # 在語義邊界處分割
-            if current_lines >= max_lines:
-                if self._is_semantic_boundary(lines, i):
-                    chunks.append('\n'.join(current_chunk))
-                    current_chunk = []
-                    current_lines = 0
-        
-        if current_chunk:
-            chunks.append('\n'.join(current_chunk))
-        
-        return chunks
+```markdown
+# 在 OpenCode 中依賴上下文建立程式碼
+"請建立 OrderService：
+
+## 參考的現有服務
+
+### UserService (已建立)
+```typescript
+export class UserService {
+  async findById(id: string): Promise<User>
+  async create(data: CreateUserDTO): Promise<User>
+}
+```
+
+### ProductService (已建立)
+```typescript
+export class ProductService {
+  async findById(id: string): Promise<Product>
+  async findAll(): Promise<Product[]>
+}
+```
+
+請參考上述模式建立 OrderService。"
 ```
 
 ## 上下文最佳化
 
 ### 1. 相關性檢索
 
-```python
-class ContextSelector:
-    def __init__(self, embeddings_model):
-        self.embeddings = embeddings_model
-    
-    def select_relevant(self, query: str, 
-                       documents: list[dict],
-                       top_k: int = 5,
-                       rerank: bool = True) -> list[dict]:
-        
-        # 1. 向量相似度檢索
-        query_embedding = self.embeddings.embed(query)
-        
-        scored_docs = []
-        for doc in documents:
-            doc_embedding = self.embeddings.embed(doc['content'])
-            similarity = cosine_similarity(query_embedding, doc_embedding)
-            scored_docs.append((similarity, doc))
-        
-        # 2. 排序
-        scored_docs.sort(key=lambda x: x[0], reverse=True)
-        
-        # 3. 重排（MMR）
-        if rerank:
-            return self._max_marginal_relevance(scored_docs[:top_k*2], query)
-        
-        return [doc for _, doc in scored_docs[:top_k]]
-    
-    def _max_marginal_relevance(self, docs: list, query: str, 
-                               lambda_mult: float = 0.5) -> list[dict]:
-        """最大邊際相關性，避免冗餘"""
-        selected = []
-        selected_embeddings = []
-        
-        for _, doc in docs:
-            doc_emb = self.embeddings.embed(doc['content'])
-            
-            # 計算 MMR 分數
-            relevance = cosine_similarity(doc_emb, self.embeddings.embed(query))
-            diversity = max(
-                cosine_similarity(doc_emb, emb) 
-                for emb in selected_embeddings
-            ) if selected_embeddings else 0
-            
-            mmr_score = relevance - lambda_mult * diversity
-            
-            if len(selected) < 5:
-                selected.append(doc)
-                selected_embeddings.append(doc_emb)
-        
-        return selected
+```markdown
+# 指定具體範圍
+"請查看：
+- 只需要 src/services/ 目錄
+- 相關的 types 在 src/types/
+- 不要查看 tests/ 目錄
+
+問題：現有的認證機制是什麼？"
 ```
 
 ### 2. 上下文視窗管理
 
-```python
-class SlidingWindowContext:
-    def __init__(self, model: str, max_tokens: int = 128000):
-        self.max_tokens = max_tokens
-        self.model = model
-        self.messages = []
-    
-    def add(self, role: str, content: str):
-        self.messages.append({"role": role, "content": content})
-        self._ensure_within_limit()
-    
-    def _ensure_within_limit(self):
-        total_tokens = self._count_tokens(self.messages)
-        
-        while total_tokens > self.max_tokens and len(self.messages) > 1:
-            self.messages.pop(0)
-            total_tokens = self._count_tokens(self.messages)
-    
-    def get_context(self) -> list[dict]:
-        return self.messages
+```markdown
+# 限制上下文範圍
+"由於代碼較長，請：
+1. 先閱讀 index.ts 了解整體結構
+2. 閱讀 exports 的主要服務
+3. 不要全部閱讀，只看相關部分
+
+然後回答：如何新增一個 API endpoint？"
+```
+
+## OpenCode 上下文管理實作
+
+### 1. 使用 CLAUDE.md
+
+```markdown
+# CLAUDE.md 內容範例
+"""
+# 專案資訊
+
+## 技術棧
+- TypeScript
+- Node.js
+- PostgreSQL
+
+## 架構
+- 使用 Clean Architecture
+- src/domain: 領域模型
+- src/application: 應用服務
+- src/infrastructure: 基礎設施
+
+## 約定
+- 所有服務使用 async/await
+- 錯誤使用 Error 類別
+- 使用 JWT token 認證
+
+## 常用指令
+- npm run dev: 開發伺服器
+- npm run test: 執行測試
+"""
+```
+
+### 2. 使用 Context 引導
+
+```markdown
+# 在對話中提供上下文
+"在我們的專案中：
+- 已有 UserService in src/services/userService.ts
+- 使用 Prisma ORM
+- 資料庫是 PostgreSQL
+
+請建立 OrderService，要求：
+- 參考 UserService 的模式
+- 使用 Prisma
+- 建立对应的 API
+"
+```
+
+### 3. 分層上下文
+
+```markdown
+# 分層提供上下文
+"## 層 1: 專案結構
+位置: src/
+├── domain/
+├── application/
+└── infrastructure/
+
+## 層 2: 相關檔案
+- UserService: src/application/userService.ts
+- UserRepository: src/infrastructure/userRepository.ts
+
+## 層 3: 具體需求
+- 建立 OrderService
+- 需要包含 CRUD
+- 使用現有的 Repository 模式
+"
 ```
 
 ## 上下文工程最佳實踐
@@ -253,23 +202,110 @@ class SlidingWindowContext:
 | 及時清理 | 移除不再需要的上下文 |
 | 版本控制 | 追蹤上下文變化 |
 
+## OpenCode 實作範例
+
+### 1. 建立功能時的上下文
+
+```markdown
+# 在建立功能前提供上下文
+"## 現有程式碼
+
+### 現有服務模式
+src/services/userService.ts:
+```typescript
+export class UserService {
+  constructor(private repo: UserRepository) {}
+  
+  async findById(id: string): Promise<User> {
+    return this.repo.findById(id)
+  }
+  
+  async create(data: CreateUserDTO): Promise<User> {
+    return this.repo.create(data)
+  }
+}
+```
+
+### 現有 Repository 模式
+src/repositories/userRepository.ts:
+```typescript
+export class UserRepository {
+  async findById(id: string): Promise<User | null>
+  async create(data: CreateUserDTO): Promise<User>
+}
+```
+
+請建立 OrderService 和 OrderRepository，遵循現有模式。"
+```
+
+### 2. 查詢時的上下文
+
+```markdown
+# 查詢時的上下文
+"## 查詢範圍
+- src/services/*.ts: 現有服務
+- src/types/*.ts: 類型定義
+
+## 需要查���
+- 認證相關的程式碼
+- API middleware
+
+請找出：現有的認證機制如何處理 JWT？"
+```
+
+### 3. 重構時的上下文
+
+```markdown
+# 重構時提供完整的上下文
+"## 現有程式碼
+位置: src/utils/legacyAuth.ts
+
+```typescript
+// 舊的認證邏輯
+function auth(req) {
+  // ...
+}
+```
+
+## 目標
+- 使用 OpenCode 的新認證模式
+- 保持相同的 API
+
+## 約束
+- 不要改變 API 介面
+- 保持向後相容
+
+請重構為新的架構。"
+```
+
 ## 評估指標
 
-```python
-def evaluate_context(context: str, task: str, response: str) -> dict:
-    return {
-        "relevance": compute_relevance(context, task),
-        "coverage": compute_coverage(context, task),
-        "conciseness": compute_conciseness(context),
-        "effectiveness": evaluate_task_success(response, task)
-    }
+```markdown
+# 評估上下文品質
+"評估以下上下文的品質：
+
+## 提供的上下文
+- 專案結構
+- 相關服務
+- 類型定義
+
+## 任務
+建立新功能
+
+## 評估標準
+1. relevance: 上下文與任務相關性
+2. coverage: 是否覆蓋所需資訊
+3. conciseness: 是否簡潔
+4. effectiveness: 任務完成效果
+"
 ```
 
 ## 相關資源
 
 - 相關概念：[Prompt工程](Prompt工程.md)
 - 相關概念：[Harness Engineering](Harness工程.md)
+- 相關概念：[Skill文檔](Skill文檔.md)
 
 ## Tags
 
-#Context #上下文工程 #RAG #LLM #資訊檢索
+#Context #上下文工程 #RAG #LLM #資訊檢索 #OpenCode

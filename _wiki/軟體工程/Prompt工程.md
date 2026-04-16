@@ -13,203 +13,286 @@
 │                                                             │
 │  [System]     你是一個專業的程式設計師                      │
 │      ↓                                                   │
-│  [Context]    使用 Python 3.9+，遵循 PEP 8 規範           │
+│  [Context]    使用 TypeScript，遵循 Clean Architecture     │
 │      ↓                                                   │
-│  [Examples]   輸入: 交換兩個變數                          │
-│               輸出: a, b = b, a                           │
+│  [Examples]   輸入: 用戶登入                               │
+│               輸出: JWT token                             │
 │      ↓                                                   │
-│  [Task]       寫一個計算費波那契數列的函式                  │
+│  [Task]       寫一個 AuthService 類別                      │
 │      ↓                                                   │
 │  [Format]     只輸出程式碼，不做解釋                        │
 │                                                             │
-└─────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 核心策略
 
 ### 1. 清晰具體的指令
 
-```python
+```markdown
 # ❌ 不好的提示
 "Write code"
 
 # ✅ 好的提示
-"""寫一個 Python 函式 calculate_fibonacci(n: int) -> int:
-- 使用迭代而非遞迴
-- 時間複雜度 O(n)
-- 包含型別註解
-- 附上 doctest 範例"""
+"寫一個 OpenCode 指令，實現用戶認證功能：
+- 使用 JWT token
+- 包含 login, logout, verify 三個指令
+- 遵循專案的 Clean Architecture
+- 輸出完整的實作內容"
 ```
 
 ### 2. Few-shot 範例
 
-```python
-prompt = """將以下句子翻譯成繁體中文：
+```markdown
+# 在 OpenCode 中使用 Few-shot
+"為我建立一個登入功能，參考以下模式：
 
-範例 1:
-英文: Hello, world!
-中文: 你好，世界！
+模式 1 (建立 API):
+[instruction]
+建立 GET /api/users 端點
+[/instruction]
+[result]
+成功建立 users.ts 和 users.test.ts
 
-範例 2:
-英文: How are you?
-中文: 你好嗎？
+模式 2 (建立 Service):
+[instruction]
+建立 UserService 類別
+[/instruction]
+[result]
+成功建立 userService.ts
 
-現在翻譯:
-英文: The weather is nice today.
-中文:"""
+現在請建立：
+[instruction]
+建立 AuthService 用於 JWT 認證
+[/instruction]
+"
 ```
 
 ### 3. Chain-of-Thought (思維鏈)
 
-```python
-prompt = """解決這個數學問題。請逐步思考。
+```markdown
+# 使用 OpenCode 的思考過程
+"我需要建立一個搜尋功能，請逐步思考：
 
-問題：小明有 15 顆蘋果，給了朋友 7 顆，又買了 12 顆。
-問題：他現在有幾顆蘋果？
+步驟 1: 先分析需求
+- 關鍵字搜尋
+- 支援分頁
+- 排序功能
 
-讓我們逐步計算：
+步驟 2: 設計資料結構
+- SearchRequest
+- SearchResponse
 
-步驟 1: 初始數量 = 15 顆
-步驟 2: 送出後 = 15 - 7 = 8 顆
-步驟 3: 買進後 = 8 + 12 = 20 顆
+步驟 3: 實作
+- [實作程式碼]
 
-答案：20 顆"""
+步驟 4: 測試
+- [測試程式碼]
+"
 ```
 
 ### 4. 角色扮演
 
-```python
-prompt = """你是一位資深 DevOps 工程師，專精 Kubernetes 和 CI/CD。
-你有 10 年的雲端原生開發經驗。
+```markdown
+# 指定專家角色
+"你是一位資深架構師，專精：
+- 領域驅動設計 (DDD)
+- 雲端原生架構
+- 事件溯源
 
-請評估以下部署策略，並提供改進建議：
+請評估以下 OpenCode 專案結構，並提供改進建議：
 
-deployment.yaml:
-[您的 YAML 內容]
-
-請從以下角度分析：
-1. 資源配置是否合理
-2. 高可用性設計
-3. 安全性最佳實踐
-4. 監控和日誌策略"""
+[專案結構]
+src/
+  domain/
+  application/
+  infrastructure/
+"
 ```
 
 ## 進階技巧
 
 ### 1. 限制輸出格式
 
-```python
-# 要求特定格式
-prompt = """用以下 JSON 格式回傳用戶資訊：
-{
-    "name": "姓名",
-    "email": "電子郵件",
-    "role": "角色"
-}
+```markdown
+# 要求特定輸出格式
+"用以下格式建立 OpenCode 指令：
 
-只回傳 JSON，不要其他文字。"""
+## 指令名稱
+auth:login
+
+## 輸入參數
+- email: string
+- password: string
+
+## 回傳
+{ token: string, expiresAt: Date }
+
+只回傳 YAML 格式的指令規格，不要其他���明。"
 ```
 
 ### 2. 結構化輸出
 
-```python
-from pydantic import BaseModel
+```markdown
+# 使用 YAML 格式
+"你是一個需求分析師。分析以下需求並以 YAML 格式回傳：
 
-class CodeReview(BaseModel):
-    issues: list[str]
-    suggestions: list[str]
-    score: int  # 1-10
-
-prompt = """你是一個程式碼審查員。分析以下程式碼並以 JSON 格式回傳：
-
-[您的程式碼]
+需求：用戶管理系統
 
 回傳格式：
-{
-    "issues": ["問題1", "問題2"],
-    "suggestions": ["建議1", "建議2"],
-    "score": 8
-}"""
+```yaml
+features:
+  - name: 用戶建立
+    priority: high
+  - name: 用戶查詢
+    priority: medium
+services:
+  - name: UserService
+    actions:
+      - create
+      - findById
+```
+"
 ```
 
 ### 3. 分解複雜任務
 
-```python
+```markdown
 # ❌ 一步完成複雜任務
-prompt = "建立一個電子商務系統"
+"建立電子商務系統"
 
 # ✅ 分步驟
-prompts = [
-    "設計資料庫 schema，只回傳 SQL",
-    "根據 schema 實作 CRUD API，只回傳 Python 程式碼",
-    "實作身份驗證中間件",
-    "實作錯誤處理和日誌記錄"
-]
+"分三個階段建立：
+
+**階段 1**: 建立領域模型
+- Product, Order, User 實體
+- 建立對應的 test files
+
+**階段 2**: 建立 Application Service
+- ProductService, OrderService
+- 實作 CRUD 邏輯
+
+**階段 3**: 建立 API
+- REST endpoints
+- 錯誤處理
+"
 ```
 
 ## Prompt 模式
 
 ### 1. Template Pattern
 
-```python
-class PromptTemplate:
-    def __init__(self, template: str):
-        self.template = template
-    
-    def render(self, **kwargs) -> str:
-        return self.template.format(**kwargs)
+```markdown
+# 使用 Template 建立指令
+"""
+建立 {entity} 的 CRUD 功能：
 
-# 使用
-template = PromptTemplate("""
-分析以下 {language} 程式碼：
+## 實體定義
+{entity} = {{
+  id: UUID,
+  name: string,
+  createdAt: Date
+}}
 
-```{language}
-{code}
-```
+## 需要建立
+- service: {entity}Service
+- test: {entity}Service.test.ts
+- handler: {entity}Handler
 
-回傳格式：
-- 時間複雜度: O(?)
-- 空間複雜度: O(?)
-- 主要問題: ...
-- 改進建議: ...
-""")
-
-prompt = template.render(language="python", code=my_code)
+請輸出完整的程式碼。
+"""
 ```
 
 ### 2. Chain Pattern
 
-```python
-def chain_of_prompts(user_input: str) -> str:
-    # 第一步：分類
-    classification = llm(f"""分類這個請求: {user_input}""")
-    
-    # 第二步：根據分類處理
-    if "code" in classification:
-        return llm(f"為這個需求寫程式碼: {user_input}")
-    elif "debug" in classification:
-        return llm(f"找出這個錯誤的原因: {user_input}")
-    else:
-        return llm(f"回答這個問題: {user_input}")
+```markdown
+# 多步驟指令鏈
+"**步驟 1**: 分析現有程式碼結構
+[讓 OpenCode 分析 src/ 目錄]
+
+**步驟 2**: 根據分析結果建立模型
+[根據步驟 1 的分析建立]
+
+**步驟 3**: 驗證
+[執行測試驗證]
+"
 ```
 
 ### 3. Ensemble Pattern
 
-```python
-def ensemble_prompt(prompt: str, n_responses: int = 3) -> str:
-    responses = []
-    for _ in range(n_responses):
-        response = llm(prompt)
-        responses.append(response)
-    
-    # 讓 LLM 綜合所有回答
-    return llm(f"""綜合以下多個回答，給出最佳回覆：
+```markdown
+# 多視角分析
+"從三個角度分析這個程式碼問題：
 
-回答1: {responses[0]}
-回答2: {responses[1]}
-回答3: {responses[2]}
+**角度 1 - 效能**:
+[分析效能問題]
 
-請給出最全面、最準確的答案。""")
+**角度 2 - 安全**:
+[分析安全問題]
+
+**角度 3 - 可維護性**:
+[分析架構問題]
+
+請綜合三個角度給出最佳解決方案。"
+```
+
+## OpenCode 實作範例
+
+### 1. 建立 Service
+
+```markdown
+"建立一個 UserService：
+
+```typescript
+// src/services/userService.ts
+export class UserService {
+  async findById(id: string): Promise<User | null> {
+    // 查詢用戶
+  }
+  
+  async create(data: CreateUserDTO): Promise<User> {
+    // 建立用戶
+  }
+}
+```
+
+請產生完整的程式碼和測試。"
+```
+
+### 2. 建立 MCP Server
+
+```markdown
+"建立一個 MCP server：
+
+```typescript
+// 需要實現
+- tools: list, get, create, update, delete
+- resources: user://{{id}}
+- prompts: 用戶管理相關
+
+請產生完整的 server 程式碼。"
+```
+
+### 3. 建立Hermes Agent
+
+```markdown
+"建立 Hermes agent 指令：
+
+```typescript
+// 定義
+agent: user-manager
+description: 管理用戶的 autonomous agent
+
+// capabilities
+- 查詢用戶資料
+- 建立/更新/刪除用戶
+- 權限管理
+
+// tools
+- database: read, write
+- notifications: send
+```
+"
 ```
 
 ## 常見陷阱
@@ -223,29 +306,31 @@ def ensemble_prompt(prompt: str, n_responses: int = 3) -> str:
 
 ## 測試和疊代
 
-```python
-def test_prompt(prompt: str, test_cases: list[dict]) -> dict:
-    results = []
-    for case in test_cases:
-        response = llm(prompt.format(**case["input"]))
-        results.append({
-            "input": case["input"],
-            "expected": case["expected"],
-            "actual": response,
-            "passed": evaluate(response, case["expected"])
-        })
-    return {
-        "total": len(results),
-        "passed": sum(1 for r in results if r["passed"]),
-        "failed": [r for r in results if not r["passed"]]
-    }
+```markdown
+# 驗證 Prompt 效果
+"測試以下 Prompt 三次，並評估結果：
+
+Prompt: "建立簡單的登入 API"
+
+測試 1: [結果 1]
+評估: [優點/問題]
+
+測試 2: [結果 2]
+評估: [優點/問題]
+
+測試 3: [結果 3]
+評估: [優點/問題]
+
+最佳化建議: [改進後的 Prompt]
+"
 ```
 
 ## 相關資源
 
 - 相關概念：[Context Engineering](Context工程.md)
 - 相關概念：[Harness Engineering](Harness工程.md)
+- 相關概念：[Skill文檔](Skill文檔.md)
 
 ## Tags
 
-#Prompt #提示詞工程 #LLM #AI工程
+#Prompt #提示詞工程 #LLM #AI工程 #OpenCode
