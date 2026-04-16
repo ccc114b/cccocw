@@ -59,13 +59,6 @@ async def call_ollama(prompt: str, system: str = "", model: str = MODEL) -> str:
             timeout=aiohttp.ClientTimeout(total=120),
         ) as resp:
             result = await resp.json()
-            if "error" in result:
-                error_msg = result.get("error", "")
-                if "usage limit" in error_msg.lower():
-                    raise Exception(
-                        f"Ollama 使用限制已達上限：{error_msg}\n請升級或等待重置。"
-                    )
-                raise Exception(f"Ollama 錯誤：{error_msg}")
             return result.get("response", "").strip()
 
 
@@ -204,17 +197,9 @@ class Guard(Agent):
 class Planner(Agent):
     def __init__(self, guard: Guard):
         system = """你是 Planner，負責規劃任務步驟並獲取資訊。
-
-重要規則：
-1. 先用 <shell> 標籤包住 shell 命令來了解現有專案結構（如 ls, cat, find 等）
-2. 分析需求後，用 <plan> 標籤包住規劃內容
-3. 完成所有操作後，用 <end/> 結束你的回覆
-
-流程：
-- 如果需要了解專案，用 <shell>...</shell> 讀取資訊
-- 讀取完後我會顯示結果
-- 如果還需要更多資訊，繼續輸出 <shell>
-- 當完成分析並輸出規劃後，輸出 <end/> 表示結束"""
+當用戶提出需求時，分析需求並規劃執行步驟。
+你可以用 <shell> 標籤包住 shell 命令來讀取檔案、目錄等資訊，但不要寫程式。
+用 <plan> 標籤包住規劃內容。"""
         super().__init__("Planner", system)
         self.guard = guard
 
@@ -336,40 +321,10 @@ class UserAgent(Agent):
             else f"<user>{user_input}</user>"
         )
         response = await self.planner.think(full_prompt)
-        current_response = response
-        tool_result = ""
 
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.planner.execute(cmd, cwd)
-                print(f"\n=== Planner 讀取 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多資訊就輸出 <shell>。如果已完成規劃，輸出 <plan>...</plan> 和 <end/>："""
-            current_response = await self.planner.think(follow_up_prompt)
+        tool_result, response = await self.handle_shell_commands(
+            response, cwd, self.planner
+        )
 
         self.record(user_input, response, tool_result)
         await self.remember(user_input, response)
@@ -382,40 +337,10 @@ class UserAgent(Agent):
             else f"<user>{user_input}</user>"
         )
         response = await self.executor.think(full_prompt)
-        current_response = response
-        tool_result = ""
 
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.executor.execute(cmd, cwd)
-                print(f"\n=== 執行命令 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多命令就輸出 <shell>。否則，輸出 <end/> 表示結束："""
-            current_response = await self.executor.think(follow_up_prompt)
+        tool_result, response = await self.handle_shell_commands(
+            response, cwd, self.executor
+        )
 
         self.record(user_input, response, tool_result)
         await self.remember(user_input, response)
@@ -428,40 +353,10 @@ class UserAgent(Agent):
             else f"<user>{user_input}</user>"
         )
         response = await self.evaluator.think(full_prompt)
-        current_response = response
-        tool_result = ""
 
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.evaluator.execute(cmd, cwd)
-                print(f"\n=== 驗證 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多驗證就輸出 <shell>。否則，輸出 <end/> 表示結束："""
-            current_response = await self.evaluator.think(follow_up_prompt)
+        tool_result, response = await self.handle_shell_commands(
+            response, cwd, self.evaluator
+        )
 
         self.record(user_input, response, tool_result)
         await self.remember(user_input, response)
