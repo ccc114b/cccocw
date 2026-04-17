@@ -1,33 +1,62 @@
-const express = require('express');
-const db = require('./database');
-const marked = require('marked');
+/**
+ * 導入必要模組
+ */
+const express = require('express'); // Web 框架，用於處理 HTTP 請求
+const db = require('./database');   // 自定義的資料庫模組（推測為 SQLite 配置）
+const marked = require('marked');   // 將 Markdown 語法轉換為 HTML 的工具
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
+/**
+ * 中間件 (Middleware) 設定
+ */
+app.use(express.json()); // 解析內容類型為 application/json 的請求
+app.use(express.urlencoded({ extended: true })); // 解析來自 HTML 表單的 URL 編碼數據
+
+/**
+ * 資料庫操作函數 - 獲取所有文章列表
+ * @param {Function} callback - 處理查詢結果的回呼函式
+ */
 function getPosts(callback) {
+  // 查詢文章 ID、標題、前 200 字內容（摘要）以及建立時間，並按時間倒序排列
   db.all('SELECT id, title, substr(content, 1, 200) as excerpt, created_at FROM posts ORDER BY created_at DESC', [], (err, rows) => {
     callback(err, rows);
   });
 }
 
+/**
+ * 資料庫操作函數 - 獲取單篇文章詳細內容
+ * @param {number|string} id - 文章 ID
+ * @param {Function} callback - 處理查詢結果的回呼函式
+ */
 function getPost(id, callback) {
+  // 使用參數化查詢（?）防止 SQL 注入
   db.get('SELECT * FROM posts WHERE id = ?', [id], (err, row) => {
     callback(err, row);
   });
 }
 
+/**
+ * 資料庫操作函數 - 新增文章
+ * @param {string} title - 文章標題
+ * @param {string} content - 文章內容 (Markdown 格式)
+ * @param {Function} callback - 處理結果的回呼函式
+ */
 function addPost(title, content, callback) {
   db.run('INSERT INTO posts (title, content) VALUES (?, ?)', [title, content], function(err) {
+    // this.lastID 是 SQLite 回傳最後插入資料的自動遞增 ID
     callback(err, this.lastID);
   });
 }
 
+/**
+ * [GET] 首頁路由 - 顯示文章清單與發文表單
+ */
 app.get('/', (req, res) => {
   getPosts((err, posts) => {
     if (err) return res.status(500).send('Error loading posts');
     
+    // 構建 HTML 頁面（含 CSS 樣式）
     let html = `<!DOCTYPE html>
 <html>
 <head>
@@ -58,6 +87,7 @@ app.get('/', (req, res) => {
     </form>
   </div>`;
 
+    // 遍歷文章陣列，動態生成 HTML 內容
     posts.forEach(post => {
       html += `<div class="post">
       <h2><a href="/post/${post.id}">${post.title}</a></h2>
@@ -72,7 +102,11 @@ app.get('/', (req, res) => {
   });
 });
 
+/**
+ * [GET] 文章詳情頁路由 - 顯示單篇文章內容
+ */
 app.get('/post/:id', (req, res) => {
+  // 從 URL 參數獲取 id
   getPost(req.params.id, (err, post) => {
     if (err || !post) return res.status(404).send('Post not found');
     
@@ -99,16 +133,25 @@ app.get('/post/:id', (req, res) => {
   });
 });
 
+/**
+ * [POST] 處理文章發佈
+ */
 app.post('/posts', (req, res) => {
   const { title, content } = req.body;
+  
+  // 基礎驗證：確保標題與內容不為空
   if (!title || !content) return res.status(400).send('Title and content required');
   
   addPost(title, content, (err, id) => {
     if (err) return res.status(500).send('Error saving post');
+    // 發佈成功後導回首頁
     res.redirect('/');
   });
 });
 
+/**
+ * 啟動伺服器，監聽 3000 埠
+ */
 app.listen(3000, () => {
   console.log('Blog running at http://localhost:3000');
 });
