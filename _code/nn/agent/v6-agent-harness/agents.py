@@ -6,9 +6,11 @@ import re
 import subprocess
 import os
 import aiohttp
+import threading
+import queue
+from typing import Optional
 
 MODEL = "minimax-m2.5:cloud"
-WORKSPACE = os.path.expanduser("~/.agent0")
 
 
 def check_outside_access(cmd: str, cwd: str) -> tuple[bool, str]:
@@ -76,6 +78,9 @@ class Agent:
         self.memory: str = ""
         self.messages: list[str] = []
         self.max_turns: int = 5
+        self.thread: Optional[threading.Thread] = None
+        self.task_queue: queue.Queue = queue.Queue()
+        self.result_queue: queue.Queue = queue.Queue()
 
     def read(self, message: str):
         self.messages.append(message)
@@ -130,10 +135,47 @@ class Agent:
         except:
             pass
 
+    def run_thread(self):
+        """Run agent in its own thread with event loop"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while True:
+                try:
+                    task = self.task_queue.get(timeout=1)
+                    if task is None:
+                        break
+                    coroutine, future = task
+                    result = loop.run_until_complete(coroutine)
+                    future.put_nowait(result)
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    if future:
+                        future.put_nowait(Exception(f"[{self.name}] 執行失敗：{e}"))
+        finally:
+            loop.close()
 
-class Guard(Agent):
+    def submit(self, coroutine) -> asyncio.Future:
+        """Submit a coroutine to be executed in this agent's thread"""
+        future: asyncio.Future = asyncio.Future()
+        self.task_queue.put((coroutine, future))
+        return future
+
+    def start(self):
+        """Start the agent thread"""
+        self.thread = threading.Thread(target=self.run_thread, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        """Stop the agent thread"""
+        self.task_queue.put(None)
+        if self.thread:
+            self.thread.join(timeout=2)
+
+
+class Guard:
     def __init__(self):
-        super().__init__("Guard", "")
         self.allowed_paths: set[str] = set()
 
     async def review_command(self, cmd: str) -> tuple[bool, str]:
@@ -205,7 +247,7 @@ class Guard(Agent):
 
 
 class Planner(Agent):
-    def __init__(self, guard: Guard):
+    def __init__(self, guard: Guard, name: str = "Planner"):
         system = """你是 Planner，負責規劃任務步驟並獲取資訊。
 
 重要規則：
@@ -218,7 +260,7 @@ class Planner(Agent):
 - 讀取完後我會顯示結果
 - 如果還需要更多資訊，繼續輸出 <shell>
 - 當完成分析並輸出規劃後，輸出 <end/> 表示結束"""
-        super().__init__("Planner", system)
+        super().__init__(name, system)
         self.guard = guard
 
     async def execute(self, command: str, cwd: str) -> str:
@@ -226,439 +268,31 @@ class Planner(Agent):
         output, error = await self.guard.check_and_execute(command, cwd)
         return output if output else error
 
-    async def plan(self, user_input: str) -> str:
-        context = f"<user>{user_input}</user>\n\n請分析並規劃執行步驟："
-        return await self.think(context)
-
 
 class Executor(Agent):
-    def __init__(self, guard: Guard):
+    def __init__(self, guard: Guard, name: str = "Executor"):
         system = """你是 Executor，負責執行 shell 命令。
 用 <shell> 標籤包住要執行的命令。"""
-        super().__init__("Executor", system)
+        super().__init__(name, system)
         self.guard = guard
+        self.assigned_task: str = ""
 
-    async def execute(self, command: str, cwd: str) -> str:
+    async def execute_shell(self, command: str, cwd: str) -> str:
         """Execute a shell command through Guard"""
         output, error = await self.guard.check_and_execute(command, cwd)
         return output if output else error
 
 
 class Evaluator(Agent):
-    def __init__(self, guard: Guard):
+    def __init__(self, guard: Guard, name: str = "Evaluator"):
         system = """你是 Evaluator，負責評估執行結果並驗證。
 檢查命令輸出是否正確完成任務。如需驗證，可執行 shell 命令。
 用 <shell> 標籤包住要執行的驗證命令。"""
-        super().__init__("Evaluator", system)
+        super().__init__(name, system)
         self.guard = guard
+        self.target_executor: Optional[Executor] = None
 
-    async def execute(self, command: str, cwd: str) -> str:
+    async def execute_shell(self, command: str, cwd: str) -> str:
         """Execute a shell command through Guard for verification"""
         output, error = await self.guard.check_and_execute(command, cwd)
         return output if output else error
-
-    async def evaluate(self, task: str, result: str) -> str:
-        context = (
-            f"<task>{task}</task>\n<result>{result}</result>\n\n評估結果是否正確："
-        )
-        return await self.think(context)
-
-
-class UserAgent(Agent):
-    MODE_PLAN = "plan"
-    MODE_EXEC = "exec"
-    MODE_EVAL = "eval"
-
-    def __init__(self, model: str = MODEL, workspace: str = WORKSPACE):
-        super().__init__("UserAgent", "")
-        self.model = model
-        self.workspace = workspace
-        self.guard = Guard()
-        self.planner = Planner(self.guard)
-        self.executor = Executor(self.guard)
-        self.evaluator = Evaluator(self.guard)
-        self.mode = self.MODE_PLAN
-        self.max_turns = 5
-
-    def get_context(self) -> str:
-        context_parts = []
-        if self.memory:
-            context_parts.append(f"<memory>{self.memory}</memory>")
-        if self.messages:
-            context_parts.append(
-                "<history>\n"
-                + "\n".join(self.messages[-self.max_turns * 2 :])
-                + "\n</history>"
-            )
-        return "\n\n".join(context_parts)
-
-    def record(self, user_msg: str, assistant_msg: str, extra: str = None):
-        super().record(user_msg, assistant_msg)
-        if extra:
-            self.messages.append(f"  <extra>{extra[:500]}</extra>")
-        while len(self.messages) > self.max_turns * 4:
-            self.messages.pop(0)
-
-    async def handle_shell_commands(
-        self, response: str, cwd: str, agent: Agent
-    ) -> tuple[str, str]:
-        """Execute shell commands in response and return tool_result"""
-        shell_matches = re.findall(r"<shell>(.+?)</shell>", response, re.DOTALL)
-        if not shell_matches:
-            return "", response
-
-        all_outputs = []
-        for cmd in shell_matches:
-            cmd = cmd.strip()
-            output = await agent.execute(cmd, cwd)
-            print(f"\n=== 執行命令 ===\n{cmd}\n\n結果：{output}\n")
-            all_outputs.append(f"$ {cmd}\n{output}")
-
-        tool_result = "\n".join(all_outputs)
-        remaining = re.sub(r"<shell>.+?</shell>", "", response, flags=re.DOTALL).strip()
-        return tool_result, remaining
-
-    async def chat(self, user_input: str) -> str:
-        import os
-
-        cwd = os.getcwd()
-        context = self.get_context()
-
-        if self.mode == self.MODE_PLAN:
-            return await self._plan_mode(user_input, context, cwd)
-        elif self.mode == self.MODE_EXEC:
-            return await self._exec_mode(user_input, context, cwd)
-        elif self.mode == self.MODE_EVAL:
-            return await self._eval_mode(user_input, context, cwd)
-        return ""
-
-    async def _plan_mode(self, user_input: str, context: str, cwd: str) -> str:
-        full_prompt = (
-            f"{context}\n\n<user>{user_input}</user>"
-            if context
-            else f"<user>{user_input}</user>"
-        )
-        response = await self.planner.think(full_prompt)
-        current_response = response
-        tool_result = ""
-
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.planner.execute(cmd, cwd)
-                print(f"\n=== Planner 讀取 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多資訊就輸出 <shell>。如果已完成規劃，輸出 <plan>...</plan> 和 <end/>："""
-            current_response = await self.planner.think(follow_up_prompt)
-
-        self.record(user_input, response, tool_result)
-        await self.remember(user_input, response)
-        return response
-
-    async def _exec_mode(self, user_input: str, context: str, cwd: str) -> str:
-        full_prompt = (
-            f"{context}\n\n<user>{user_input}</user>"
-            if context
-            else f"<user>{user_input}</user>"
-        )
-        response = await self.executor.think(full_prompt)
-        current_response = response
-        tool_result = ""
-
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.executor.execute(cmd, cwd)
-                print(f"\n=== 執行命令 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多命令就輸出 <shell>。否則，輸出 <end/> 表示結束："""
-            current_response = await self.executor.think(follow_up_prompt)
-
-        self.record(user_input, response, tool_result)
-        await self.remember(user_input, response)
-        return response
-
-    async def _eval_mode(self, user_input: str, context: str, cwd: str) -> str:
-        full_prompt = (
-            f"{context}\n\n<user>{user_input}</user>"
-            if context
-            else f"<user>{user_input}</user>"
-        )
-        response = await self.evaluator.think(full_prompt)
-        current_response = response
-        tool_result = ""
-
-        while True:
-            if "<end/>" in current_response:
-                response = current_response.split("<end/>")[0].strip()
-                break
-
-            shell_matches = re.findall(
-                r"<shell>(.+?)</shell>", current_response, re.DOTALL
-            )
-            if not shell_matches:
-                response = current_response
-                break
-
-            all_outputs = []
-            for cmd in shell_matches:
-                cmd = cmd.strip()
-                output = await self.evaluator.execute(cmd, cwd)
-                print(f"\n=== 驗證 ===\n{cmd}\n\n結果：{output}\n")
-                all_outputs.append(f"$ {cmd}\n{output}")
-
-            tool_result = (tool_result or "") + "\n" + "\n".join(all_outputs)
-
-            follow_up_prompt = f"""<context>{context}</context>
-
-<user>{user_input}</user>
-<assistant>{current_response}</assistant>
-<output>
-{chr(10).join(all_outputs)}
-</output>
-
-如果需要更多驗證就輸出 <shell>。否則，輸出 <end/> 表示結束："""
-            current_response = await self.evaluator.think(follow_up_prompt)
-
-        self.record(user_input, response, tool_result)
-        await self.remember(user_input, response)
-        return response
-
-    def _get_help(self) -> str:
-        return """可用指令：
-  /help     - 顯示此幫助
-  /plan     - 切換至 Plan Mode（規劃任務）
-  /exec     - 切換至 Exec Mode（執行命令）
-  /eval     - 切換至 Eval Mode（驗證結果）
-  /memory   - 顯示長期記憶
-  /new      - 新建 session（清除對話歷史）
-  /export   - 匯出 session transcript
-  /init     - 初始化 AGENTS.md
-  /quit     - 結束"""
-
-    def _export_transcript(self) -> str:
-        import datetime
-
-        lines = [
-            f"# Session Transcript - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            f"",
-            f"## Memory",
-            f"{self.memory}" if self.memory else "(empty)",
-            f"",
-            f"## Conversation",
-        ]
-        for msg in self.messages:
-            lines.append(msg)
-        return "\n".join(lines)
-
-    def _scan_project(self, cwd: str) -> str:
-        """Scan project directory and return file listing"""
-        import os
-
-        key_files = [
-            "README.md",
-            "README.txt",
-            "README",
-            "package.json",
-            "requirements.txt",
-            "pyproject.toml",
-            "Cargo.toml",
-            "Makefile",
-            "CMakeLists.txt",
-            "AGENTS.md",
-            "CLAUDE.md",
-            "test.sh",
-            "tests/",
-            "test_*.py",
-            "*_test.py",
-            "src/",
-            "lib/",
-            "app/",
-        ]
-
-        lines = [f"專案路徑：{cwd}", ""]
-        lines.append("=== 目錄結構 ===")
-
-        try:
-            for root, dirs, files in os.walk(cwd):
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not d.startswith(".")
-                    and d not in ["__pycache__", "node_modules", "target", "bin", "obj"]
-                ]
-                level = root.replace(cwd, "").count(os.sep)
-                indent = "  " * level
-                lines.append(f"{indent}{os.path.basename(root)}/")
-                sub_indent = "  " * (level + 1)
-                for f in sorted(files)[:20]:
-                    lines.append(f"{sub_indent}{f}")
-                if len(files) > 20:
-                    lines.append(f"{sub_indent}... ({len(files) - 20} more files)")
-        except Exception as e:
-            lines.append(f"掃描錯誤：{e}")
-
-        lines.append("")
-        lines.append("=== 關鍵檔案內容 ===")
-
-        for key_file in [
-            "README.md",
-            "package.json",
-            "requirements.txt",
-            "pyproject.toml",
-            "Makefile",
-        ]:
-            fpath = os.path.join(cwd, key_file)
-            if os.path.exists(fpath):
-                try:
-                    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()[:2000]
-                        lines.append(f"\n--- {key_file} ---")
-                        lines.append(content)
-                except:
-                    pass
-
-        return "\n".join(lines)
-
-    async def _init_project(self, target_dir: str) -> str:
-        """Use Planner to understand the project"""
-        scan_result = self._scan_project(target_dir)
-
-        prompt = f"""請分析以下專案結構，建立對該專案的理解：
-
-{scan_result}
-
-請用 <project> 標籤輸出：
-1. 專案類型（網站、CLI工具、函式庫等）
-2. 主要語言和框架
-3. 測試方式
-4. 建置/執行方式
-5. 重要約定或規範"""
-
-        response = await self.planner.think(prompt)
-        project_match = re.search(r"<project>(.+?)</project>", response, re.DOTALL)
-        project_info = project_match.group(1).strip() if project_match else response
-
-        self.memory = f"<project>\n{project_info}\n</project>\n<dir>{target_dir}</dir>"
-
-        return f"已分析專案：{target_dir}\n\n{project_info}"
-
-    def _init_agents_md(self, cwd: str) -> str:
-        """Initialize project understanding (async, returns message)"""
-        return f"請稍候，正在掃描專案...\n(使用 /init 觸發 Planner 分析)"
-
-    def _new_session(self):
-        self.messages = []
-        self.memory = ""
-        self.mode = self.MODE_PLAN
-        return "已新建 session"
-
-    def run(self):
-        import os
-
-        os.makedirs(self.workspace, exist_ok=True)
-        cwd = os.getcwd()
-
-        print(f"UserAgent - {self.model}")
-        print(f"工作區：{self.workspace}")
-        print("模式：Plan Mode")
-        print("輸入 /help 查看所有指令\n")
-
-        while True:
-            try:
-                user_input = input("你：").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n再見！")
-                break
-
-            if not user_input:
-                continue
-            if user_input.lower() in ["/quit", "/exit", "/q"]:
-                print("再見！")
-                break
-            if user_input.lower() == "/help":
-                print(f"\n{self._get_help()}\n")
-                continue
-            if user_input.lower() == "/memory":
-                print(f"\n長期記憶：{self.memory if self.memory else '(empty)'}\n")
-                continue
-            if user_input.lower() == "/export":
-                transcript = self._export_transcript()
-                print(f"\n{transcript}\n")
-                continue
-            if user_input.lower().startswith("/init"):
-                parts = user_input.split(maxsplit=1)
-                target_dir = parts[1].strip() if len(parts) > 1 else cwd
-                try:
-                    result = asyncio.run(self._init_project(target_dir))
-                    print(f"\n{result}\n")
-                except Exception as e:
-                    print(f"\n⚠️  錯誤：{e}\n")
-                continue
-            if user_input.lower() == "/new":
-                print(f"\n{self._new_session()}\n")
-                continue
-            if user_input.lower() == "/exec":
-                self.mode = self.MODE_EXEC
-                print(">>> 切換至 Exec Mode\n")
-                continue
-            if user_input.lower() == "/eval":
-                self.mode = self.MODE_EVAL
-                print(">>> 切換至 Eval Mode\n")
-                continue
-            if user_input.lower() == "/plan":
-                self.mode = self.MODE_PLAN
-                print(">>> 切換至 Plan Mode\n")
-                continue
-
-            try:
-                response = asyncio.run(self.chat(user_input))
-                print(f"\n🤖 [{self.mode.upper()}] {response}\n")
-            except Exception as e:
-                print(f"\n⚠️  錯誤：{e}\n")
