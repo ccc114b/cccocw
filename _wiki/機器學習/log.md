@@ -1,5 +1,23 @@
 # 日誌
 
+## [2026-04-15] add | 機器學習進階技術
+
+- 新增 模型評估.md - AUC、交叉驗證、混淆矩陣、學習曲線
+- 新增 損失函數.md - MSE、Cross-Entropy、Focal Loss、對比損失
+- 新增 正則化.md - L1/L2、Dropout、BatchNorm、Mixup/CutMix
+- 新增 自然語言處理.md - Tokenization、Word2Vec、Transformer
+- 新增 電腦視覺.md - CNN、ResNet、U-Net、DeepLabV3
+- 新增 異常偵測.md - Isolation Forest、Autoencoder、Deep SVDD
+- 新增 推薦系統.md - 協同過濾、矩陣分解、DeepFM
+- 新增 聯邦學習.md - FedAvg、差分隱私保護
+- 更新 index.md
+
+## [2026-04-15] add | 機器學習的歷史
+
+- 新增 機器學習的歷史.md - 從符號 AI 到深度學習的完整歷程
+- 涵蓋：專家系統、深度學習革命、CNN/RNN 演進、生成式 AI、強化學習里程碑
+- 約 390 行，含程式碼範例
+
 ## [2026-04-08] add | 分類演算法範例
 
 - 新增 支持向量機.md - SVM 說明
