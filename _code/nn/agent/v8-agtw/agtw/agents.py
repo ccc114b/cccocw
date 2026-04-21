@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# agents.py - Agent classes: Planner, Executor, Evaluator, Guard
+"""
+Agent classes for agtw system
+"""
 
 import asyncio
 import re
 import subprocess
 import os
-import aiohttp
 import threading
 import queue
 from typing import Optional
@@ -50,28 +51,33 @@ def check_outside_access(cmd: str, cwd: str) -> tuple[bool, str]:
 
 async def call_ollama(prompt: str, system: str = "", model: str = MODEL) -> str:
     """Call Ollama API"""
+    import aiohttp
+
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
     payload = {"model": model, "prompt": full_prompt, "stream": False}
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "http://localhost:11434/api/generate",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            result = await resp.json()
-            if "error" in result:
-                error_msg = result.get("error", "")
-                if "usage limit" in error_msg.lower():
-                    raise Exception(
-                        f"Ollama 使用限制已達上限：{error_msg}\n請升級或等待重置。"
-                    )
-                raise Exception(f"Ollama 錯誤：{error_msg}")
-            return result.get("response", "").strip()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://localhost:11434/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                result = await resp.json()
+                if "error" in result:
+                    error_msg = result.get("error", "")
+                    if "usage limit" in error_msg.lower():
+                        raise Exception(f"Ollama 使用限制已達上限：{error_msg}")
+                    raise Exception(f"Ollama 錯誤：{error_msg}")
+                return result.get("response", "").strip()
+    except Exception as e:
+        raise Exception(f"呼叫 Ollama 失敗：{e}")
 
 
 class Agent:
+    """Base Agent class with memory and message handling"""
+
     def __init__(self, name: str, system: str = ""):
         self.name = name
         self.system = system
@@ -173,8 +179,26 @@ class Agent:
         if self.thread:
             self.thread.join(timeout=2)
 
+    def to_dict(self) -> dict:
+        """Serialize agent state"""
+        return {
+            "name": self.name,
+            "memory": self.memory,
+            "messages": self.messages,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, **kwargs):
+        """Deserialize agent state"""
+        agent = cls(**kwargs)
+        agent.memory = data.get("memory", "")
+        agent.messages = data.get("messages", [])
+        return agent
+
 
 class Guard:
+    """Security guard for shell command review"""
+
     def __init__(self):
         self.allowed_paths: set[str] = set()
 
@@ -201,7 +225,6 @@ class Guard:
 
         try:
             response = await call_ollama(review_prompt, "", MODEL)
-
             if response.startswith("SAFE"):
                 return True, ""
             else:
@@ -245,51 +268,55 @@ class Guard:
         except Exception as e:
             return "", f"錯誤：{e}"
 
+    def to_dict(self) -> dict:
+        return {"allowed_paths": list(self.allowed_paths)}
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        guard = cls()
+        guard.allowed_paths = set(data.get("allowed_paths", []))
+        return guard
+
 
 class Planner(Agent):
+    """Planner agent - analyzes requirements and plans tasks"""
+
     def __init__(self, guard: Guard, name: str = "Planner", session=None):
         system = """你是 Planner，負責分析需求並規劃任務。
 
 你有能力啟動 Executor 和 Evaluator：
-- <exec> 任務描述 </exec> - 啟動 Executor 執行任務
-- <eval> 評估描述 </eval> - 啟動 Evaluator 評估結果
 - <shell> 命令 </shell> - 執行 shell 命令讀取資訊
+- <exec> 任務描述 </exec> - 請求啟動 Executor
+- <eval> 評估描述 </eval> - 請求啟動 Evaluator
+- <plan> 規劃內容 </plan> - 輸出規劃內容
+- <end/> - 完成回覆
 
 重要規則：
 1. 用 <shell> 標籤了解專案結構
-2. 用 <plan> 標籤包住規劃內容
-3. 用 <exec> 標籤交辦任務給 Executor
-4. 用 <eval> 標籤要求 Evaluator 驗證
-5. 完成後用 <end/> 結束
-
-流程：
-- 用 <shell>...</shell> 讀取資訊
-- 用 <exec>...</exec> 啟動 Executor
-- 用 <eval>...</eval> 啟動 Evaluator
-- 完成後輸出 <end/>"""
+2. 用 <exec> 交辦任務給 Executor
+3. 用 <eval> 要求 Evaluator 驗證
+4. 完成後用 <end/>"""
         super().__init__(name, system)
         self.guard = guard
         self.session = session
 
-    async def execute(self, command: str, cwd: str) -> str:
-        """Execute a shell command through Guard for reading/info gathering"""
+    async def execute_shell(self, command: str, cwd: str) -> str:
+        """Execute a shell command through Guard"""
         output, error = await self.guard.check_and_execute(command, cwd)
         return output if output else error
 
-    def request_executor(self, task: str = "") -> "Executor":
-        """Request creation of an Executor"""
-        if self.session:
-            return self.session.create_executor(task, auto_start=False)
-        return None
+    def request_exec(self, task: str) -> dict:
+        """Request to create an Executor"""
+        return {"action": "exec", "task": task}
 
-    def request_evaluator(self, *targets: "Executor") -> "Evaluator":
-        """Request creation of an Evaluator"""
-        if self.session:
-            return self.session.create_evaluator(*targets, auto_start=False)
-        return None
+    def request_eval(self, desc: str) -> dict:
+        """Request to create an Evaluator"""
+        return {"action": "eval", "desc": desc}
 
 
 class Executor(Agent):
+    """Executor agent - executes tasks assigned by Planner"""
+
     def __init__(self, guard: Guard, name: str = "Executor"):
         system = """你是 Executor，負責執行 Planner 交辦的任務。
 
@@ -298,7 +325,7 @@ class Executor(Agent):
 - 寫報告（建立文件）
 - 搜集資訊（讀取檔案、執行命令）
 - 完成計劃（執行多個步驟）
-- 完成程式專案 (完整的程式，包含自動測試)
+- 執行自動測試
 
 重要規則：
 1. 用 <shell> 標籤包住要執行的 shell 命令
@@ -306,9 +333,8 @@ class Executor(Agent):
 
 流程：
 - 執行 <shell>...</shell> 中的命令來完成任務
-- 執行完後我會顯示結果
 - 如果還需要更多操作，繼續輸出 <shell>
-- 當完成所有任務後，輸出 <end/> 表示結束"""
+- 當完成所有任務後，輸出 <end/>"""
         super().__init__(name, system)
         self.guard = guard
         self.assigned_task: str = ""
@@ -320,6 +346,8 @@ class Executor(Agent):
 
 
 class Evaluator(Agent):
+    """Evaluator agent - verifies Executor results"""
+
     def __init__(self, guard: Guard, name: str = "Evaluator"):
         system = """你是 Evaluator，負責驗證 Executor 執行結果的正確性。
 
@@ -332,13 +360,7 @@ class Evaluator(Agent):
 重要規則：
 1. 用 <shell> 標籤包住驗證工具（如執行測試、檢查檔案內容等）
 2. 根據驗證結果，提供改進建議或確認完成
-3. 完成驗證後，用 <end/> 結束你的回覆
-
-流程：
-- 使用 <shell>...</shell> 執行驗證工具
-- 驗證完後我會顯示結果
-- 如果還需要更多驗證，繼續輸出 <shell>
-- 當完成驗證並給出結論後，輸出 <end/> 表示結束"""
+3. 完成驗證後，用 <end/> 結束你的回覆"""
         super().__init__(name, system)
         self.guard = guard
         self.target_executors: list[Executor] = []

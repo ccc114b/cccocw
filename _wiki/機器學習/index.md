@@ -14,10 +14,13 @@
 - [反傳遞演算法](反傳遞演算法.md) - 神經網路訓練的核心演算法 | tags: 梯度, 鏈規則
 - [Adam](Adam.md) - 自適應學習率優化器 | tags: Momentum, RMSprop
 - [分類演算法](分類演算法.md) - 離散類別預測 | tags: SVM, 決策樹, 隨機森林
+- [K-近鄰](K-近鄰.md) - 基於實例的分類 | tags: KNN, 距離度量, 投票
+- [樸素貝葉斯](樸素貝葉斯.md) - 基於貝葉斯定理的分類 | tags: Naive_Bayes, 貝葉斯, 文本
 - [支持向量機](支持向量機.md) - 最大間隔分類器 | tags: SVM, kernel, margin
 - [決策樹](決策樹.md) - 樹狀結構分類模型 | tags: entropy, information_gain
 - [隨機森林](隨機森林.md) - 集成學習分類器 | tags: ensemble, bootstrap
 - [聚類演算法](聚類演算法.md) - 將相似資料分組 | tags: K-Means, DBSCAN, 層次
+- [K-均值](K-均值.md) - K-Means 聚類演算法 | tags: K-Means, 聚類, 無監督
 - [主成分分析](主成分分析.md) - 維度降低技術 | tags: PCA, 特徵值, 特徵向量
 
 ## 主題

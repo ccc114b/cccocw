@@ -2,7 +2,7 @@
 
 加入 session 的觀念 (每個 session 有自己的 agent group)
 
-1. 隨時用 /session.new <name> 就可以創建一個新的 session 創建 新的 planner (session name 和 planner name 是一樣的), 系統自動給定 id
+1. 隨時用 /session.new <name> 就可以創建一個新的 session 創建 新的 planner (session name 和 planner name 是一樣的), 系統自動給定 id （這應該要用 thread 去創建）
     * 當使用 /exec <job_description> 時，會創建新的 Executor 去執行某任務
     * 當使用 /eval <eval_description> 時，會創建新的 Evaluator 去評量目前 Executor 的任務
     * 一個 session 只能有一個 planner ，但是可以有很多 executor 和 evaluator

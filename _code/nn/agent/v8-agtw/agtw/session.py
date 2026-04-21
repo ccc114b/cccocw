@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# session.py - Session and SessionManager classes
+"""
+Session classes for agtw system
+"""
 
 import uuid
 from typing import Optional, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agents import Guard, Executor, Evaluator, Planner
+    from .agents import Guard, Executor, Evaluator, Planner
 
 
 class Session:
@@ -16,7 +18,7 @@ class Session:
         self.name = name
         self.model = model
         self.guard = guard
-        from agents import Planner, Executor, Evaluator
+        from .agents import Planner, Executor, Evaluator
 
         self.planner = Planner(guard, f"Planner[{name}]", session=self)
         self.executors: list["Executor"] = []
@@ -26,7 +28,7 @@ class Session:
 
     def create_executor(self, task: str = "", auto_start: bool = True) -> "Executor":
         """Create a new executor for a task"""
-        from agents import Executor
+        from .agents import Executor
 
         idx = len(self.executors) + 1
         exec = Executor(self.guard, f"Executor[{self.name}-{idx}]")
@@ -40,7 +42,7 @@ class Session:
         self, *targets: "Executor", auto_start: bool = True
     ) -> "Evaluator":
         """Create a new evaluator, optionally following specific executors"""
-        from agents import Evaluator
+        from .agents import Evaluator
 
         idx = len(self.evaluators) + 1
         eval = Evaluator(self.guard, f"Evaluator[{self.name}-{idx}]")
@@ -98,6 +100,52 @@ class Session:
         for ev in self.evaluators:
             ev.stop()
 
+    def to_dict(self) -> dict:
+        """Serialize session state"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "model": self.model,
+            "memory": self.memory,
+            "planner": self.planner.to_dict(),
+            "executors": [e.to_dict() for e in self.executors],
+            "evaluators": [ev.to_dict() for ev in self.evaluators],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, guard):
+        """Deserialize session state"""
+        from .agents import Planner, Executor, Evaluator
+
+        session = cls.__new__(cls)
+        session.id = data.get("id", str(uuid.uuid4())[:8])
+        session.name = data.get("name", "unknown")
+        session.model = data.get("model", "minimax-m2.5:cloud")
+        session.guard = guard
+        session.memory = data.get("memory", "")
+
+        session.planner = Planner(
+            guard, data.get("planner", {}).get("name", "Planner"), session=session
+        )
+        session.planner.memory = data.get("planner", {}).get("memory", "")
+        session.planner.messages = data.get("planner", {}).get("messages", [])
+
+        session.executors = []
+        for e_data in data.get("executors", []):
+            exec = Executor(guard, e_data.get("name", "Executor"))
+            exec.memory = e_data.get("memory", "")
+            exec.messages = e_data.get("messages", [])
+            session.executors.append(exec)
+
+        session.evaluators = []
+        for ev_data in data.get("evaluators", []):
+            ev = Evaluator(guard, ev_data.get("name", "Evaluator"))
+            ev.memory = ev_data.get("memory", "")
+            ev.messages = ev_data.get("messages", [])
+            session.evaluators.append(ev)
+
+        return session
+
 
 class SessionManager:
     """Manages multiple sessions"""
@@ -106,7 +154,7 @@ class SessionManager:
         self.model = model
         self.sessions: dict[str, Session] = {}
         self.current_session: Optional[Session] = None
-        from agents import Guard
+        from .agents import Guard
 
         self.guard = Guard()
         self._session_counter: int = 0
@@ -134,6 +182,19 @@ class SessionManager:
             return self.current_session
         return None
 
+    def delete_session(self, identifier: str) -> bool:
+        """Delete a session"""
+        if identifier not in self.sessions:
+            return False
+        session = self.sessions[identifier]
+        session.shutdown()
+        del self.sessions[identifier]
+        if session.id in self.sessions:
+            del self.sessions[session.id]
+        if self.current_session == session:
+            self.current_session = None
+        return True
+
     def list_sessions(self) -> str:
         if not self.sessions:
             return "目前沒有任何 session"
@@ -158,3 +219,31 @@ class SessionManager:
             session.shutdown()
         self.sessions.clear()
         self.current_session = None
+
+    def to_dict(self) -> dict:
+        """Serialize session manager state"""
+        return {
+            "model": self.model,
+            "sessions": {k: v.to_dict() for k, v in self.sessions.items()},
+            "current_session_id": self.current_session.id
+            if self.current_session
+            else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Deserialize session manager state"""
+        manager = cls(data.get("model", "minimax-m2.5:cloud"))
+        from .agents import Guard
+
+        guard = Guard()
+        for k, v in data.get("sessions", {}).items():
+            session = Session.from_dict(v, guard)
+            manager.sessions[k] = session
+            manager.sessions[session.id] = session
+
+        current_id = data.get("current_session_id")
+        if current_id and current_id in manager.sessions:
+            manager.current_session = manager.sessions[current_id]
+
+        return manager

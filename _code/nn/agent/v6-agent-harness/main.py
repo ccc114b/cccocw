@@ -15,11 +15,15 @@ WORKSPACE = os.path.expanduser("~/.agent0")
 class UserCli:
     """CLI interface for Agent system with session management"""
 
+    MODE_AUTO = "auto"
+    MODE_MANUAL = "manual"
+
     def __init__(self, model: str = MODEL, workspace: str = WORKSPACE):
         self.model = model
         self.workspace = workspace
         self.session_manager = SessionManager(model)
         self.session_manager.create_session("main")
+        self.mode = self.MODE_AUTO
 
     def _get_help(self) -> str:
         return """可用指令：
@@ -30,6 +34,8 @@ class UserCli:
   /agents          - 列出目前 session 的所有 agent
   /exec <task>     - 建立新 Executor 執行任務
   /eval <desc> [exec] - 建立新 Evaluator（可指定 Executor）
+  /auto            - 切換至自動模式（Planner 直接啟動 Agent）
+  /manual          - 切換至控管模式（Planner 需確認後啟動 Agent）
   /memory          - 顯示長期記憶
   /export          - 匯出 transcript
   /init [dir]      - 初始化專案理解
@@ -138,6 +144,71 @@ class UserCli:
             return f"已分析專案：{target_dir}\n\n{project_info}"
         except Exception as e:
             return f"初始化失敗：{e}"
+
+    def _handle_exec_tag(self, task: str) -> str:
+        """Handle <exec> tag - create and optionally run executor"""
+        if self.mode == self.MODE_AUTO:
+            executor = self.session_manager.get_current().create_executor(task)
+            executor.start()
+            return f"已自動啟動 Executor：{executor.name} (任務：{task})"
+        else:
+            return f"[需確認] Planner 請求啟動 Executor：{task}\n請輸入 /exec {task} 確認執行"
+
+    def _handle_eval_tag(self, desc: str) -> str:
+        """Handle <eval> tag - create and optionally run evaluator"""
+        if self.mode == self.MODE_AUTO:
+            evaluator = self.session_manager.get_current().create_evaluator()
+            evaluator.start()
+            return f"已自動啟動 Evaluator：{evaluator.name}"
+        else:
+            return f"[需確認] Planner 請求啟動 Evaluator：{desc}\n請輸入 /eval {desc} 確認執行"
+
+    async def _run_executor(self, executor) -> str:
+        """Run an executor with its assigned task"""
+        context = executor.get_context()
+        task = executor.assigned_task
+        full_prompt = (
+            f"{context}\n\n<user>{task}</user>" if context else f"<user>{task}</user>"
+        )
+
+        try:
+            response = await executor.think(full_prompt)
+            current_response = response
+
+            while True:
+                if "<end/>" in current_response:
+                    response = current_response.split("<end/>")[0].strip()
+                    break
+
+                shell_matches = re.findall(
+                    r"<shell>(.+?)</shell>", current_response, re.DOTALL
+                )
+                if not shell_matches:
+                    response = current_response
+                    break
+
+                all_outputs = []
+                for cmd in shell_matches:
+                    cmd = cmd.strip()
+                    output = await executor.execute_shell(cmd, os.getcwd())
+                    print(f"\n=== Executor 執行 ===\n{cmd}\n\n結果：{output}\n")
+                    all_outputs.append(f"$ {cmd}\n{output}")
+
+                follow_up = f"""<context>{context}</context>
+
+<user>{task}</user>
+<assistant>{current_response}</assistant>
+<output>
+{chr(10).join(all_outputs)}
+</output>
+
+如果需要更多命令就輸出 <shell>。否則，輸出 <end/>："""
+                current_response = await executor.think(follow_up)
+
+            executor.record(task, response)
+            return response
+        except Exception as e:
+            return f"Executor 執行錯誤：{e}"
 
     async def _plan_mode(self, user_input: str) -> str:
         session = self.session_manager.get_current()

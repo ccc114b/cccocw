@@ -67,11 +67,13 @@ if method == "TD_LAMBDA":
 
 print('完成迭代，展示學習成果 ...')
 
-env = gym.make('FrozenLake-v1', render_mode="human")
+env = gym.make('FrozenLake-v1', render_mode=None)
 s, info = env.reset()
 for i in range(100):
-    env.render()
+    # img = env.render()  # 這裡有 bug，改用文字輸出
+    print(f"Step {i}: state={s}, action={np.argmax(Q[s,:])}")
     a = np.argmax(Q[s,:]) # 永遠取 Q table 中的最佳行動
     s, reward, terminated, truncated, info = env.step(a)
     if terminated == True:
+        print(f"Finished! reward={reward}")
         break
