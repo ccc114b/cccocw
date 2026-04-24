@@ -151,7 +151,16 @@ app.post('/posts', (req, res) => {
 
 /**
  * 啟動伺服器，監聽 3000 埠
+ * 只有直接執行 server.js 時才會啟動伺服器
+ * 匯入測試時不會啟動
  */
-app.listen(3000, () => {
-  console.log('Blog running at http://localhost:3000');
-});
+if (require.main === module) {
+  app.listen(3000, () => {
+    console.log('Blog running at http://localhost:3000');
+  });
+}
+
+/**
+ * 匯出 app 供測試使用
+ */
+module.exports = app;
